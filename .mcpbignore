@@ -5,7 +5,7 @@
 .mcpbignore
 *.mcpb
 
-# Trim node_modules
+# Trim node_modules — safe exclusions only
 **/test/
 **/tests/
 **/test.js
@@ -23,24 +23,15 @@
 **/Gruntfile.js
 **/.nojekyll
 **/CNAME
-**/index.html
 **/favicon.ico
 **/man/
-**/bin/
 **/examples/
 **/example/
 **/fixtures/
-**/src/
-**/dist/
 **/*.test-d.ts
-**/*.ts
-!**/*.d.ts
 **/release-please-config.json
 **/.release-please-manifest.json
 **/rollup.config.js
-**/createIndex.ts
-**/postcjs.ts
-**/postesm.ts
 **/inc-version.sh
 **/check.js
 **/readme.markdown
