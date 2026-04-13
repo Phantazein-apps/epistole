@@ -1,0 +1,129 @@
+{
+  "manifest_version": "0.3",
+  "name": "epistole",
+  "display_name": "Epistole — IMAP/SMTP Email",
+  "version": "1.0.0",
+  "description": "Read, search, send, and manage email via IMAP and SMTP. Works with any provider (Migadu, Fastmail, Gmail app passwords, etc.).",
+  "long_description": "Epistole connects Claude to your email account over standard IMAP (port 993, TLS) and SMTP (port 465, SSL) protocols. It supports reading your inbox, searching messages, viewing full message content, sending new emails, replying to threads, listing folders, marking messages read/unread, and moving messages between folders. All credentials are stored securely in the OS keychain via Claude Desktop's user_config system.",
+  "author": {
+    "name": "Phantazein"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Phantazein-apps/epistole"
+  },
+  "keywords": ["email", "imap", "smtp", "mail", "inbox"],
+  "server": {
+    "type": "node",
+    "entry_point": "index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/index.js"],
+      "env": {
+        "EMAIL_ADDRESS": "${user_config.email_address}",
+        "FULL_NAME": "${user_config.full_name}",
+        "IMAP_HOST": "${user_config.imap_host}",
+        "IMAP_PORT": "${user_config.imap_port}",
+        "SMTP_HOST": "${user_config.smtp_host}",
+        "SMTP_PORT": "${user_config.smtp_port}",
+        "EMAIL_USERNAME": "${user_config.username}",
+        "EMAIL_PASSWORD": "${user_config.password}"
+      }
+    }
+  },
+  "user_config": {
+    "email_address": {
+      "type": "string",
+      "title": "Email Address",
+      "description": "Your full email address (e.g. you@example.com)",
+      "required": true
+    },
+    "full_name": {
+      "type": "string",
+      "title": "Full Name",
+      "description": "Your name as it should appear in sent emails",
+      "required": true
+    },
+    "imap_host": {
+      "type": "string",
+      "title": "IMAP Host",
+      "description": "IMAP server hostname (e.g. imap.migadu.com)",
+      "required": true
+    },
+    "imap_port": {
+      "type": "string",
+      "title": "IMAP Port",
+      "description": "IMAP server port (usually 993 for TLS)",
+      "required": true,
+      "default": "993"
+    },
+    "smtp_host": {
+      "type": "string",
+      "title": "SMTP Host",
+      "description": "SMTP server hostname (e.g. smtp.migadu.com)",
+      "required": true
+    },
+    "smtp_port": {
+      "type": "string",
+      "title": "SMTP Port",
+      "description": "SMTP server port (usually 465 for SSL)",
+      "required": true,
+      "default": "465"
+    },
+    "username": {
+      "type": "string",
+      "title": "Username",
+      "description": "Email account username (usually same as email address)",
+      "required": true
+    },
+    "password": {
+      "type": "string",
+      "title": "Password",
+      "description": "Email account password or app-specific password",
+      "required": true,
+      "sensitive": true
+    }
+  },
+  "tools": [
+    {
+      "name": "read_inbox",
+      "description": "List recent messages from inbox or any folder"
+    },
+    {
+      "name": "search_messages",
+      "description": "Search messages using IMAP search criteria"
+    },
+    {
+      "name": "get_message",
+      "description": "Get full content of a specific message by UID"
+    },
+    {
+      "name": "send_message",
+      "description": "Compose and send a new email"
+    },
+    {
+      "name": "reply_to_message",
+      "description": "Reply to an existing email message"
+    },
+    {
+      "name": "list_folders",
+      "description": "List all available mailbox folders"
+    },
+    {
+      "name": "mark_read",
+      "description": "Mark a message as read"
+    },
+    {
+      "name": "mark_unread",
+      "description": "Mark a message as unread"
+    },
+    {
+      "name": "move_message",
+      "description": "Move a message to a different folder"
+    }
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"]
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "epistole",
+  "version": "1.0.0",
+  "description": "IMAP/SMTP email MCP server",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "imapflow": "^1.0.172",
+    "nodemailer": "^6.10.1",
+    "mailparser": "^3.7.2"
+  },
+  "license": "MIT"
+}
