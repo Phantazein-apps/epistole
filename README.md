@@ -1,5 +1,7 @@
 # Epistole — IMAP/SMTP Email MCP Server
 
+*Epistole* (ἐπιστολή) — Greek for "letter" or "epistle," the root of the English word *epistle*.
+
 An MCP server that connects Claude to your email account over standard IMAP and SMTP protocols. Packaged as an `.mcpb` bundle for one-click installation in Claude Desktop.
 
 ## Features
