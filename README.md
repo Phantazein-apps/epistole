@@ -17,7 +17,7 @@ An MCP server that connects Claude to your email account over standard IMAP and 
 
 ### Quick Install (Recommended)
 
-1. Download `email.mcpb` from the [latest release](https://github.com/Phantazein-apps/epistole/releases/latest)
+1. Download `epistole.mcpb` from the [latest release](https://github.com/Phantazein-apps/epistole/releases/latest)
 2. Double-click the file — Claude Desktop opens and prompts for your settings
 3. Fill in your email provider details (see table below)
 4. Done — start chatting with Claude about your email
