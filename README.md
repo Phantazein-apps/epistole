@@ -15,20 +15,41 @@ An MCP server that connects Claude to your email account over standard IMAP and 
 
 ## Installation
 
-Double-click `email.mcpb` to install in Claude Desktop. You'll be prompted for:
+### Quick Install (Recommended)
 
-| Field | Example |
-|-------|---------|
-| Email Address | `you@example.com` |
-| Full Name | `Your Name` |
-| IMAP Host | `imap.migadu.com` |
-| IMAP Port | `993` |
-| SMTP Host | `smtp.migadu.com` |
-| SMTP Port | `465` |
-| Username | `you@example.com` |
-| Password | your email password |
+1. Download `email.mcpb` from the [latest release](https://github.com/Phantazein-apps/epistole/releases/latest)
+2. Double-click the file — Claude Desktop opens and prompts for your settings
+3. Fill in your email provider details (see table below)
+4. Done — start chatting with Claude about your email
 
-Your password is stored in the OS keychain, never in plain text.
+### Configuration
+
+You'll be prompted for these fields during installation. All values are stored securely in your OS keychain.
+
+| Field | Example | Notes |
+|-------|---------|-------|
+| Email Address | `you@example.com` | Your full email address |
+| Full Name | `Your Name` | Appears in the From header of sent emails |
+| IMAP Host | `imap.migadu.com` | Your provider's IMAP server |
+| IMAP Port | `993` | Default for TLS — rarely needs changing |
+| SMTP Host | `smtp.migadu.com` | Your provider's SMTP server |
+| SMTP Port | `465` | Default for SSL — rarely needs changing |
+| Username | `you@example.com` | Usually same as email address |
+| Password | ••••••••• | App password recommended (see below) |
+
+### Provider Quick Reference
+
+| Provider | IMAP Host | SMTP Host | Notes |
+|----------|-----------|-----------|-------|
+| **Migadu** | `imap.migadu.com` | `smtp.migadu.com` | Use full email as username |
+| **Fastmail** | `imap.fastmail.com` | `smtp.fastmail.com` | App password required |
+| **Gmail** | `imap.gmail.com` | `smtp.gmail.com` | [App password](https://myaccount.google.com/apppasswords) required |
+| **Outlook/Hotmail** | `outlook.office365.com` | `smtp.office365.com` | Port 587 for SMTP |
+| **Yahoo** | `imap.mail.yahoo.com` | `smtp.mail.yahoo.com` | App password required |
+| **ProtonMail** | `127.0.0.1` | `127.0.0.1` | Requires [ProtonMail Bridge](https://proton.me/mail/bridge) running locally |
+| **iCloud** | `imap.mail.me.com` | `smtp.mail.me.com` | App password required |
+
+> **Tip:** Most providers require an **app-specific password** rather than your main account password. Check your provider's security settings to generate one.
 
 ## Compatibility
 
