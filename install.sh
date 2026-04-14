@@ -233,26 +233,104 @@ ask "Custom domain (leave empty to skip):"
 read CUSTOM_DOMAIN
 
 if [ -n "$CUSTOM_DOMAIN" ]; then
-  # Remove any protocol prefix
+  # Remove any protocol prefix and trailing slash
   CUSTOM_DOMAIN=$(echo "$CUSTOM_DOMAIN" | sed 's|^https\?://||' | sed 's|/$||')
 
-  # Add route to wrangler.toml
-  if ! grep -q "custom_domain" wrangler.toml; then
-    cat >> wrangler.toml <<ROUTEEOF
+  # Extract the root domain (last two segments, or last three for co.uk etc.)
+  ROOT_DOMAIN=$(echo "$CUSTOM_DOMAIN" | awk -F. '{if (NF>=2) print $(NF-1)"."$NF; else print $0}')
+
+  # Check if the root domain exists in the user's Cloudflare account
+  info "Checking if ${ROOT_DOMAIN} is in your Cloudflare account..."
+  ZONE_CHECK=$(npx wrangler dns list-zones 2>&1 || true)
+
+  if echo "$ZONE_CHECK" | grep -qi "$ROOT_DOMAIN"; then
+    ok "Zone found: $ROOT_DOMAIN"
+  else
+    # Fallback: try the API directly via wrangler
+    ZONE_API=$(node -e "
+      const { execSync } = require('child_process');
+      try {
+        const out = execSync('npx wrangler whoami 2>&1', { encoding: 'utf8' });
+        console.log('auth_ok');
+      } catch { console.log('auth_fail'); }
+    " 2>/dev/null)
+
+    # Try deploying anyway — wrangler deploy will give a clear error if the domain isn't available
+    warn "Could not verify ${ROOT_DOMAIN} in your Cloudflare zones."
+    echo -e "  ${DIM}The domain's root zone (${ROOT_DOMAIN}) must be active in your Cloudflare account.${NC}"
+    echo -e "  ${DIM}If it's not, the deploy will fail with a domain ownership error.${NC}"
+    echo ""
+    ask "Continue anyway? [Y/n]"
+    read CONTINUE_DOMAIN
+    CONTINUE_DOMAIN="${CONTINUE_DOMAIN:-Y}"
+    if [[ ! "$CONTINUE_DOMAIN" =~ ^[Yy] ]]; then
+      CUSTOM_DOMAIN=""
+      info "Skipping custom domain — will use default *.workers.dev URL"
+    fi
+  fi
+
+  if [ -n "$CUSTOM_DOMAIN" ]; then
+    # Add route to wrangler.toml
+    if ! grep -q "custom_domain" wrangler.toml; then
+      cat >> wrangler.toml <<ROUTEEOF
 
 [[routes]]
 pattern = "${CUSTOM_DOMAIN}"
 custom_domain = true
 ROUTEEOF
+    fi
+    ok "Custom domain configured: $CUSTOM_DOMAIN"
   fi
-  ok "Custom domain: $CUSTOM_DOMAIN"
 fi
 
 # ── Deploy ──────────────────────────────────────────────────────────────
 header "Deploying"
 
 DEPLOY_OUTPUT=$(npx wrangler deploy 2>&1)
+DEPLOY_EXIT=$?
 WORKER_URL=$(echo "$DEPLOY_OUTPUT" | grep -o 'https://[^ ]*\.workers\.dev' | head -1)
+
+# Check for custom domain errors
+if [ $DEPLOY_EXIT -ne 0 ] && [ -n "$CUSTOM_DOMAIN" ]; then
+  if echo "$DEPLOY_OUTPUT" | grep -qi "domain\|zone\|DNS\|conflict\|ownership"; then
+    echo ""
+    echo -e "${RED}Deploy failed — custom domain error:${NC}"
+    echo "$DEPLOY_OUTPUT" | grep -i "domain\|zone\|DNS\|conflict\|ownership\|error" | head -5
+    echo ""
+    warn "This usually means:"
+    echo -e "  ${DIM}• The root domain (${ROOT_DOMAIN}) is not in your Cloudflare account${NC}"
+    echo -e "  ${DIM}• Another Worker is already using this domain${NC}"
+    echo -e "  ${DIM}• The subdomain conflicts with an existing DNS record${NC}"
+    echo ""
+    ask "Retry without custom domain? [Y/n]"
+    read RETRY_NO_DOMAIN
+    RETRY_NO_DOMAIN="${RETRY_NO_DOMAIN:-Y}"
+    if [[ "$RETRY_NO_DOMAIN" =~ ^[Yy] ]]; then
+      # Remove the routes block from wrangler.toml
+      if [[ "$OSTYPE" == "darwin"* ]]; then
+        sed -i '' '/^\[\[routes\]\]/,/^$/d' wrangler.toml
+      else
+        sed -i '/^\[\[routes\]\]/,/^$/d' wrangler.toml
+      fi
+      CUSTOM_DOMAIN=""
+      info "Retrying deploy without custom domain..."
+      DEPLOY_OUTPUT=$(npx wrangler deploy 2>&1)
+      WORKER_URL=$(echo "$DEPLOY_OUTPUT" | grep -o 'https://[^ ]*\.workers\.dev' | head -1)
+    else
+      echo ""
+      echo "$DEPLOY_OUTPUT"
+      fail "Deploy failed. Fix the domain issue and run 'npx wrangler deploy' manually."
+    fi
+  else
+    echo ""
+    echo "$DEPLOY_OUTPUT"
+    fail "Deploy failed. Check the error above."
+  fi
+elif [ $DEPLOY_EXIT -ne 0 ]; then
+  echo ""
+  echo "$DEPLOY_OUTPUT"
+  fail "Deploy failed. Check the error above."
+fi
 
 if [ -z "$WORKER_URL" ]; then
   warn "Could not detect Worker URL from deploy output."
