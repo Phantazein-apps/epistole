@@ -34,31 +34,27 @@ header() {
 echo ""
 echo -e "${BOLD}  ✉  Epistole — Email MCP Server${NC}"
 echo -e "${DIM}  Connect Claude to your email via IMAP/SMTP${NC}"
-echo -e "${DIM}  Deployed as a Cloudflare Worker${NC}"
+echo -e "${DIM}  Deployed as a Cloudflare Worker with OAuth${NC}"
 echo ""
 
 # ── Check dependencies ──────────────────────────────────────────────────
 header "Checking dependencies"
 
-# Node.js
 if ! command -v node &>/dev/null; then
   fail "Node.js not found. Install from https://nodejs.org"
 fi
 ok "Node.js $(node --version)"
 
-# npm
 if ! command -v npm &>/dev/null; then
   fail "npm not found. Install Node.js from https://nodejs.org"
 fi
 ok "npm $(npm --version)"
 
-# npx (comes with npm 5.2+)
 if ! command -v npx &>/dev/null; then
   fail "npx not found. Update npm: npm install -g npm"
 fi
 ok "npx available"
 
-# Wrangler — install globally if not available
 if ! command -v wrangler &>/dev/null; then
   info "Installing wrangler globally..."
   npm install -g wrangler 2>&1 | tail -1
@@ -68,7 +64,6 @@ if ! command -v wrangler &>/dev/null; then
 fi
 ok "wrangler $(wrangler --version 2>&1 | head -1)"
 
-# Check Cloudflare auth
 if ! wrangler whoami &>/dev/null 2>&1; then
   echo ""
   warn "Not logged into Cloudflare."
@@ -139,8 +134,7 @@ header "Credentials"
 ask "Email address:"; read EMAIL_ADDRESS
 ask "Full name (for From header):"; read FULL_NAME
 
-# Username defaults to email
-ask "Username [${EMAIL_ADDRESS}]:"; read IMAP_USER
+ask "IMAP username [${EMAIL_ADDRESS}]:"; read IMAP_USER
 IMAP_USER="${IMAP_USER:-$EMAIL_ADDRESS}"
 
 if [ "$PROVIDER" = "Gmail" ] || [ "$PROVIDER" = "Fastmail" ] || [ "$PROVIDER" = "Yahoo" ] || [ "$PROVIDER" = "iCloud" ]; then
@@ -155,19 +149,26 @@ if [ "$PROVIDER" = "Gmail" ] || [ "$PROVIDER" = "Fastmail" ] || [ "$PROVIDER" = 
   echo ""
 fi
 
-secret "Password:"
+secret "Email password:"
 EMAIL_PASS="$REPLY"
 
-# SMTP credentials — same as IMAP unless specified
 SMTP_USER="$IMAP_USER"
 SMTP_PASS="$EMAIL_PASS"
 
-# ── Validate credentials ───────────────────────────────────────────────
+# ── OAuth login password ───────────────────────────────────────────────
+echo ""
+echo -e "  ${DIM}Epistole uses OAuth so you can connect from any device.${NC}"
+echo -e "  ${DIM}Choose a password for the login page — this is what you'll${NC}"
+echo -e "  ${DIM}enter when connecting from Claude Desktop, claude.ai, or mobile.${NC}"
+echo ""
+secret "Epistole login password:"
+AUTH_PASSWORD="$REPLY"
+
+# ── Validate IMAP credentials ──────────────────────────────────────────
 header "Validating credentials"
 
 info "Connecting to ${IMAP_HOST}:${IMAP_PORT}..."
 
-# Use openssl to test IMAP login (available on macOS and most Linux)
 IMAP_TEST=$(expect <<EXPECTEOF 2>&1 || true
 set timeout 10
 spawn openssl s_client -connect ${IMAP_HOST}:${IMAP_PORT} -quiet
@@ -202,7 +203,6 @@ elif echo "$IMAP_TEST" | grep -q "CONNECTION_FAILED\|TIMEOUT"; then
     fail "Aborted. Fix your IMAP settings and try again."
   fi
 else
-  # expect might not be available — fall back to openssl-only check
   OPENSSL_TEST=$(echo -e "A1 LOGIN \"${IMAP_USER}\" \"${EMAIL_PASS}\"\nA2 LOGOUT" | \
     openssl s_client -connect "${IMAP_HOST}:${IMAP_PORT}" -quiet 2>/dev/null | \
     head -20)
@@ -221,10 +221,6 @@ else
     fi
   fi
 fi
-
-# ── Generate MCP token ──────────────────────────────────────────────────
-MCP_TOKEN=$(openssl rand -hex 32)
-ok "Generated MCP auth token"
 
 # ── Create Cloudflare resources ─────────────────────────────────────────
 header "Creating Cloudflare resources"
@@ -262,6 +258,24 @@ info "Creating Vectorize index..."
 wrangler vectorize create email-embeddings --dimensions=768 --metric=cosine &>/dev/null 2>&1 || true
 ok "Vectorize index ready"
 
+# KV (for OAuth state)
+info "Creating KV namespace for OAuth..."
+KV_OUTPUT=$(wrangler kv namespace create email-mcp-oauth 2>&1) || true
+KV_ID=$(echo "$KV_OUTPUT" | grep -o 'id = "[^"]*"' | head -1 | cut -d'"' -f2)
+if [ -z "$KV_ID" ]; then
+  KV_ID=$(wrangler kv namespace list 2>&1 | grep -A1 email-mcp-oauth | grep -o '[0-9a-f]\{32\}' | head -1)
+fi
+if [ -n "$KV_ID" ]; then
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    sed -i '' "s/id = \"[^\"]*\"/id = \"$KV_ID\"/" wrangler.toml
+  else
+    sed -i "s/id = \"[^\"]*\"/id = \"$KV_ID\"/" wrangler.toml
+  fi
+  ok "KV namespace ready"
+else
+  warn "Could not determine KV ID — check wrangler.toml manually"
+fi
+
 # ── Set secrets ─────────────────────────────────────────────────────────
 header "Setting secrets"
 
@@ -280,7 +294,7 @@ set_secret "SMTP_USER" "$SMTP_USER"
 set_secret "SMTP_PASS" "$SMTP_PASS"
 set_secret "EMAIL_ADDRESS" "$EMAIL_ADDRESS"
 set_secret "FULL_NAME" "$FULL_NAME"
-set_secret "MCP_TOKEN" "$MCP_TOKEN"
+set_secret "AUTH_PASSWORD" "$AUTH_PASSWORD"
 
 ok "All 11 secrets set (encrypted in Cloudflare)"
 
@@ -296,16 +310,11 @@ ask "Custom domain (leave empty to skip):"
 read CUSTOM_DOMAIN
 
 if [ -n "$CUSTOM_DOMAIN" ]; then
-  # Remove any protocol prefix and trailing slash
   CUSTOM_DOMAIN=$(echo "$CUSTOM_DOMAIN" | sed 's|^https\?://||' | sed 's|/$||')
-
-  # Extract the root domain (last two segments, or last three for co.uk etc.)
   ROOT_DOMAIN=$(echo "$CUSTOM_DOMAIN" | awk -F. '{if (NF>=2) print $(NF-1)"."$NF; else print $0}')
 
-  # Check if the root domain exists in the user's Cloudflare account
   info "Checking if ${ROOT_DOMAIN} is in your Cloudflare account..."
 
-  # Extract OAuth token from wrangler config to query the CF API directly
   WRANGLER_CONFIG="${HOME}/Library/Preferences/.wrangler/config/default.toml"
   if [ ! -f "$WRANGLER_CONFIG" ]; then
     WRANGLER_CONFIG="${HOME}/.wrangler/config/default.toml"
@@ -340,7 +349,6 @@ if [ -n "$CUSTOM_DOMAIN" ]; then
   fi
 
   if [ -n "$CUSTOM_DOMAIN" ]; then
-    # Add route to wrangler.toml
     if ! grep -q "custom_domain" wrangler.toml; then
       cat >> wrangler.toml <<ROUTEEOF
 
@@ -359,31 +367,22 @@ header "Deploying"
 DEPLOY_OUTPUT=$(wrangler deploy 2>&1)
 DEPLOY_EXIT=$?
 
-# Detect URL — custom domain or workers.dev
 if [ -n "$CUSTOM_DOMAIN" ]; then
-  # Custom domain is configured — use it directly
   WORKER_URL="https://${CUSTOM_DOMAIN}"
 else
   WORKER_URL=$(echo "$DEPLOY_OUTPUT" | grep -o 'https://[^ ]*\.workers\.dev' | head -1)
 fi
 
-# Check for custom domain errors
 if [ $DEPLOY_EXIT -ne 0 ] && [ -n "$CUSTOM_DOMAIN" ]; then
   if echo "$DEPLOY_OUTPUT" | grep -qi "domain\|zone\|DNS\|conflict\|ownership"; then
     echo ""
     echo -e "${RED}Deploy failed — custom domain error:${NC}"
     echo "$DEPLOY_OUTPUT" | grep -i "domain\|zone\|DNS\|conflict\|ownership\|error" | head -5
     echo ""
-    warn "This usually means:"
-    echo -e "  ${DIM}• The root domain (${ROOT_DOMAIN}) is not in your Cloudflare account${NC}"
-    echo -e "  ${DIM}• Another Worker is already using this domain${NC}"
-    echo -e "  ${DIM}• The subdomain conflicts with an existing DNS record${NC}"
-    echo ""
     ask "Retry without custom domain? [Y/n]"
     read RETRY_NO_DOMAIN
     RETRY_NO_DOMAIN="${RETRY_NO_DOMAIN:-Y}"
     if [[ "$RETRY_NO_DOMAIN" =~ ^[Yy] ]]; then
-      # Remove the routes block from wrangler.toml
       if [[ "$OSTYPE" == "darwin"* ]]; then
         sed -i '' '/^\[\[routes\]\]/,/^$/d' wrangler.toml
       else
@@ -429,9 +428,7 @@ CONFIG_SNIPPET=$(cat <<JSONEOF
       "command": "npx",
       "args": [
         "mcp-remote",
-        "${MCP_ENDPOINT}",
-        "--header",
-        "Authorization: Bearer ${MCP_TOKEN}"
+        "${MCP_ENDPOINT}"
       ]
     }
   }
@@ -441,9 +438,7 @@ JSONEOF
 
 echo ""
 
-# Check if config file exists and has mcpServers
 if [ -f "$CONFIG_FILE" ]; then
-  # Check if it already has an "email" server
   if grep -q '"email"' "$CONFIG_FILE" 2>/dev/null; then
     warn "Claude Desktop config already has an 'email' MCP server."
     echo -e "  ${DIM}Update it manually with the config below.${NC}"
@@ -454,37 +449,17 @@ if [ -f "$CONFIG_FILE" ]; then
     read AUTO_CONFIG
     AUTO_CONFIG="${AUTO_CONFIG:-Y}"
     if [[ "$AUTO_CONFIG" =~ ^[Yy] ]]; then
-      # Read existing config, merge mcpServers
-      EXISTING=$(cat "$CONFIG_FILE")
-      if echo "$EXISTING" | grep -q '"mcpServers"'; then
-        # Has mcpServers — inject our server into it
-        # Use node for reliable JSON manipulation
-        node -e "
-          const fs = require('fs');
-          const cfg = JSON.parse(fs.readFileSync('$CONFIG_FILE', 'utf8'));
-          cfg.mcpServers = cfg.mcpServers || {};
-          cfg.mcpServers.email = {
-            command: 'npx',
-            args: ['mcp-remote', '${MCP_ENDPOINT}', '--header', 'Authorization: Bearer ${MCP_TOKEN}']
-          };
-          fs.writeFileSync('$CONFIG_FILE', JSON.stringify(cfg, null, 2) + '\n');
-        "
-        ok "Added 'email' server to Claude Desktop config"
-      else
-        # No mcpServers key — add it
-        node -e "
-          const fs = require('fs');
-          const cfg = JSON.parse(fs.readFileSync('$CONFIG_FILE', 'utf8'));
-          cfg.mcpServers = {
-            email: {
-              command: 'npx',
-              args: ['mcp-remote', '${MCP_ENDPOINT}', '--header', 'Authorization: Bearer ${MCP_TOKEN}']
-            }
-          };
-          fs.writeFileSync('$CONFIG_FILE', JSON.stringify(cfg, null, 2) + '\n');
-        "
-        ok "Added 'email' server to Claude Desktop config"
-      fi
+      node -e "
+        const fs = require('fs');
+        const cfg = JSON.parse(fs.readFileSync('$CONFIG_FILE', 'utf8'));
+        cfg.mcpServers = cfg.mcpServers || {};
+        cfg.mcpServers.email = {
+          command: 'npx',
+          args: ['mcp-remote', '${MCP_ENDPOINT}']
+        };
+        fs.writeFileSync('$CONFIG_FILE', JSON.stringify(cfg, null, 2) + '\n');
+      "
+      ok "Added 'email' server to Claude Desktop config"
     else
       echo ""
       echo "Add this to $CONFIG_FILE:"
@@ -493,7 +468,6 @@ if [ -f "$CONFIG_FILE" ]; then
     fi
   fi
 else
-  # Create the config file
   ask "Create Claude Desktop config? [Y/n]"
   read CREATE_CONFIG
   CREATE_CONFIG="${CREATE_CONFIG:-Y}"
@@ -514,75 +488,49 @@ header "Setup complete"
 
 echo ""
 echo -e "  ${GREEN}✉  Epistole is deployed and running.${NC}"
-
-# ── Security warning ────────────────────────────────────────────────────
 echo ""
-echo -e "  ${RED}┌─────────────────────────────────────────────────────────┐${NC}"
-echo -e "  ${RED}│${NC}  ${BOLD}${RED}SAVE YOUR MCP TOKEN — KEEP IT SECRET${NC}                     ${RED}│${NC}"
-echo -e "  ${RED}│${NC}                                                           ${RED}│${NC}"
-echo -e "  ${RED}│${NC}  ${DIM}${MCP_TOKEN}${NC}"
-echo -e "  ${RED}│${NC}                                                           ${RED}│${NC}"
-echo -e "  ${RED}│${NC}  Anyone with this token has full access to your email:    ${RED}│${NC}"
-echo -e "  ${RED}│${NC}  read every message, send as you, delete emails,          ${RED}│${NC}"
-echo -e "  ${RED}│${NC}  and download all attachments.                            ${RED}│${NC}"
-echo -e "  ${RED}│${NC}                                                           ${RED}│${NC}"
-echo -e "  ${RED}│${NC}  Treat it like a password. Don't commit it to git,        ${RED}│${NC}"
-echo -e "  ${RED}│${NC}  share it in Slack, or paste it in public.                ${RED}│${NC}"
-echo -e "  ${RED}│${NC}                                                           ${RED}│${NC}"
-echo -e "  ${RED}│${NC}  If compromised: ${DIM}wrangler secret put MCP_TOKEN${NC}            ${RED}│${NC}"
-echo -e "  ${RED}│${NC}  ${DIM}(set a new value — the old one is revoked immediately)${NC}   ${RED}│${NC}"
-echo -e "  ${RED}└─────────────────────────────────────────────────────────┘${NC}"
-echo ""
-
-# ── Connection details ──────────────────────────────────────────────────
 echo -e "  ${BOLD}MCP Endpoint:${NC}  ${CYAN}${MCP_ENDPOINT}${NC}"
-echo -e "  ${BOLD}Auth Header:${NC}   ${DIM}Authorization: Bearer <your-token>${NC}"
 echo ""
 
-# ── How to connect each client ──────────────────────────────────────────
 header "Connect to Claude"
 
 echo ""
-echo -e "  ${BOLD}${GREEN}Claude Desktop${NC}  $([ -f "$CONFIG_FILE" ] && echo -e "${GREEN}— configured ✓${NC}" || echo -e "${YELLOW}— see config above${NC}")"
-echo -e "  ${BOLD}${YELLOW}⚠  Restart Claude Desktop now for changes to take effect.${NC}"
+echo -e "  ${BOLD}Claude Desktop${NC}  $([ -f "$CONFIG_FILE" ] && echo -e "${GREEN}— configured ✓${NC}" || echo -e "${YELLOW}— see config above${NC}")"
+echo -e "  ${YELLOW}⚠  Restart Claude Desktop now.${NC}"
+echo -e "  On first use, a browser window will open asking for your"
+echo -e "  Epistole login password. Enter the password you just set."
 echo ""
 echo -e "  ${BOLD}Claude Code${NC}"
-echo -e "  Run this command:"
+echo -e "  ${DIM}claude mcp add email -- npx mcp-remote ${MCP_ENDPOINT}${NC}"
+echo -e "  A browser window will open for login on first use."
 echo ""
-echo -e "  ${DIM}claude mcp add email \\\\${NC}"
-echo -e "  ${DIM}  -- npx mcp-remote ${MCP_ENDPOINT} \\\\${NC}"
-echo -e "  ${DIM}  --header \"Authorization: Bearer ${MCP_TOKEN:0:8}...\"${NC}"
+echo -e "  ${BOLD}Claude.ai (web)${NC}"
+echo -e "  Go to ${DIM}claude.ai → Settings → Integrations → Add Custom Connector${NC}"
+echo -e "  Enter: ${CYAN}${MCP_ENDPOINT}${NC}"
+echo -e "  Claude will redirect to your login page — enter your password."
 echo ""
-echo -e "  ${BOLD}Claude.ai (web) & Claude Mobile (iOS/Android)${NC}"
-echo -e "  Remote MCP on claude.ai currently requires OAuth authentication."
-echo -e "  Bearer token support is not yet available in the web UI."
-echo -e "  ${DIM}Track progress: https://github.com/anthropics/claude-ai-mcp/issues/112${NC}"
-echo -e "  ${DIM}OAuth support for Epistole is planned — once added, mobile will work.${NC}"
-echo ""
-echo -e "  ${BOLD}Other MCP clients${NC}"
-echo -e "  Point any MCP client (Streamable HTTP) at the endpoint"
-echo -e "  with the ${DIM}Authorization: Bearer <token>${NC} header."
+echo -e "  ${BOLD}Claude Mobile (iOS / Android)${NC}"
+echo -e "  Connectors added on claude.ai sync to mobile automatically."
+echo -e "  Add it on the web first (step above), then open Claude on your phone."
 echo ""
 
-# ── What happens next ───────────────────────────────────────────────────
 header "What to do next"
 
 echo ""
 echo -e "  ${BOLD}1. Restart Claude Desktop${NC}"
 echo -e "     The MCP server won't appear until you restart."
+echo -e "     A browser window will open for login — enter your Epistole password."
 echo ""
-echo -e "  ${BOLD}2. Test live email tools${NC} (work immediately)"
+echo -e "  ${BOLD}2. Test live email tools${NC} (work immediately after login)"
 echo -e "     Ask Claude: ${DIM}\"Show my recent emails\"${NC}"
 echo -e "     Ask Claude: ${DIM}\"List my email folders\"${NC}"
 echo ""
 echo -e "  ${BOLD}3. Build the search index${NC} (one-time, takes a few minutes)"
 echo -e "     Ask Claude: ${DIM}\"Sync my email now\"${NC}"
-echo -e "     This fetches your messages, generates embeddings, and"
-echo -e "     indexes them for semantic search."
+echo -e "     Fetches your messages, generates embeddings, and indexes them."
 echo ""
 echo -e "  ${BOLD}4. Check sync progress${NC}"
 echo -e "     Ask Claude: ${DIM}\"What's my email sync status?\"${NC}"
-echo -e "     Shows how many messages are indexed and any errors."
 echo ""
 echo -e "  ${BOLD}5. Use semantic search${NC} (available after step 3 completes)"
 echo -e "     ${DIM}\"Find emails about invoices from January\"${NC}"
@@ -593,5 +541,6 @@ echo -e "  every 15 minutes by a background cron job."
 echo ""
 echo -e "  ${DIM}Server files: $INSTALL_DIR${NC}"
 echo -e "  ${DIM}Email credentials are encrypted as Cloudflare Worker secrets.${NC}"
+echo -e "  ${DIM}Login password can be changed: wrangler secret put AUTH_PASSWORD --name email-mcp${NC}"
 echo -e "  ${DIM}No email data is stored on your local machine.${NC}"
 echo ""
