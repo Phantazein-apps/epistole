@@ -18,7 +18,6 @@ export interface Env {
   SMTP_PASS: string;
   EMAIL_ADDRESS: string;
   FULL_NAME: string;
-  AUTH_PASSWORD: string;
 }
 
 export interface EmailMeta {
