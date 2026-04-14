@@ -4,6 +4,8 @@
 
 A **remote MCP server** that connects Claude to your email over IMAP/SMTP, with semantic search powered by Cloudflare's AI stack. Runs as a single Cloudflare Worker — nothing installed locally.
 
+Unlike local email MCP servers, Epistole runs in the cloud: it syncs continuously (not just when your laptop is open), works from any device including mobile, and never stores email data on your machine. Your own Cloudflare account, your own Worker, your own data.
+
 ## Install
 
 You need a [Cloudflare account](https://dash.cloudflare.com/sign-up) (free) and [Node.js](https://nodejs.org). Then:
@@ -14,11 +16,14 @@ curl -fsSL https://raw.githubusercontent.com/Phantazein-apps/epistole/master/ins
 
 The installer will:
 1. Check dependencies and log you into Cloudflare if needed
-2. Ask for your email provider, address, and password
-3. Create all Cloudflare resources (D1, R2, Vectorize)
-4. Set credentials as encrypted Worker secrets
-5. Deploy the Worker
-6. Configure Claude Desktop automatically
+2. Ask for your email provider (Migadu, Gmail, Fastmail, etc.), address, and password
+3. Validate your IMAP credentials before proceeding
+4. Create all Cloudflare resources (D1, R2, Vectorize)
+5. Set credentials as encrypted Worker secrets
+6. Optionally configure a custom domain (e.g. `mail.yourdomain.com`)
+7. Deploy the Worker
+8. Configure Claude Desktop automatically
+9. Show connection details for any other MCP client
 
 After it finishes, restart Claude Desktop and ask Claude to show your emails.
 
