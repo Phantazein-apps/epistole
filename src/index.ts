@@ -13,7 +13,7 @@ import { registerSearchTools } from "./tools/search.js";
 import { runIncrementalSync } from "./sync/incremental.js";
 import type { Env } from "./types.js";
 
-// ── MCP Agent ──────────────────────────────────────────────────────────────
+// ── MCP Agent (Durable Object) ────────────────────────────────────────────
 
 export class EmailMcpAgent extends McpAgent<Env> {
   server = new McpServer({
@@ -33,21 +33,28 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // Health check
+    // Health check — no auth required
     if (url.pathname === "/health") {
       return new Response("ok");
     }
 
-    // MCP endpoint — auth required
+    // Everything under /mcp requires bearer token auth
     if (url.pathname === "/mcp" || url.pathname.startsWith("/mcp/")) {
-      // Bearer token auth
       const auth = request.headers.get("Authorization");
       if (!auth || auth !== `Bearer ${env.MCP_TOKEN}`) {
         return new Response("Unauthorized", { status: 401 });
       }
 
-      // Route to MCP agent
-      return (EmailMcpAgent as any).serve(url.pathname).fetch(request, env, ctx);
+      // Route to the Durable Object via Agents SDK
+      const agentId = env.MCP_AGENT.idFromName("default");
+      const agent = env.MCP_AGENT.get(agentId);
+
+      // Strip the /mcp prefix — the agent expects paths relative to its root
+      const agentUrl = new URL(request.url);
+      agentUrl.pathname = agentUrl.pathname.replace(/^\/mcp/, "") || "/";
+
+      const agentRequest = new Request(agentUrl.toString(), request);
+      return agent.fetch(agentRequest);
     }
 
     return new Response("Not Found", { status: 404 });
@@ -58,7 +65,6 @@ export default {
       (async () => {
         console.log("Cron sync starting...");
 
-        // Record sync job
         const jobId = crypto.randomUUID().substring(0, 8);
         await env.DB.prepare(
           "INSERT INTO sync_jobs (job_id, status, started_at, folders, full_sync) VALUES (?, 'running', ?, 'all', 0)"

@@ -4,6 +4,7 @@ export interface Env {
   R2: R2Bucket;
   VECTORIZE: VectorizeIndex;
   AI: Ai;
+  MCP_AGENT: DurableObjectNamespace;
 
   // Secrets
   IMAP_HOST: string;

@@ -24,3 +24,12 @@ index_name = "email-embeddings"
 
 [ai]
 binding = "AI"
+
+[durable_objects]
+bindings = [
+  { name = "MCP_AGENT", class_name = "EmailMcpAgent" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["EmailMcpAgent"]
