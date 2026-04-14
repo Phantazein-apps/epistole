@@ -1,162 +1,152 @@
-# Epistole — IMAP/SMTP Email MCP Server
+# Epistole — Email MCP Server
 
-*Epistole* (ἐπιστολή) — Greek for "letter" or "epistle," the root of the English word *epistle*.
+*Epistole* (ἐπιστολή) — Greek for "letter" or "epistle."
 
-An MCP server that connects Claude to your email account over standard IMAP and SMTP protocols, with **local semantic search** powered by ChromaDB and model2vec. Packaged as an `.mcpb` bundle for one-click installation in Claude Desktop.
+A **remote MCP server** that connects Claude to your email over IMAP/SMTP, with semantic search powered by Cloudflare's AI stack. Runs as a single Cloudflare Worker — nothing installed locally.
 
-## Features
+## Architecture
 
-### Live IMAP/SMTP tools
+```
+Claude Desktop → mcp-remote → Cloudflare Worker (/mcp)
+                                    │
+                    ┌───────────────┼───────────────┐
+                    │               │               │
+                Workers AI      Vectorize          D1
+              (embeddings)    (vector search)   (metadata)
+                    │                               │
+                   R2                          IMAP / SMTP
+              (attachments)                (your email server)
+```
 
-- **read_inbox** — List recent messages from any folder
-- **search_messages** — Search by sender, recipient, subject, body, date, read status
-- **get_message** — Full message content with text, HTML, and attachment list
-- **send_message** — Compose and send new emails
-- **reply_to_message** — Reply (or reply-all) with proper threading headers
-- **list_folders** — List all mailbox folders
-- **mark_read / mark_unread** — Toggle read status
-- **move_message** — Move messages between folders
+All email data stays in your own Cloudflare account. No third-party services. $0/month on the free tier for personal use.
 
-### Semantic search (v2)
+## Tools (14)
 
-- **semantic_search** — Find emails by meaning, not just keywords. Searches across subject, body, and extracted PDF attachment text.
-- **get_attachments** — List attachments from local disk (fast, never calls IMAP)
-- **sync_now** — Trigger an immediate mailbox sync
-- **sync_status** — Check sync progress, per-folder stats, and errors
-- **find_by_thread** — Find all messages in a thread by Message-ID or subject
+### Live IMAP/SMTP
 
-## Installation
+| Tool | Description |
+|------|-------------|
+| `read_inbox` | List recent messages from any folder |
+| `search_messages` | Search by sender, recipient, subject, body, date |
+| `get_message` | Full message content with text, HTML, attachments |
+| `send_message` | Compose and send new emails |
+| `reply_to_message` | Reply or reply-all with proper threading |
+| `list_folders` | List all mailbox folders |
+| `mark_read` / `mark_unread` | Toggle read status |
+| `move_message` | Move messages between folders |
 
-### One-click install (Claude Desktop)
+### Semantic Search
 
-1. Download `epistole.mcpb` from the [latest release](https://github.com/Phantazein-apps/epistole/releases/latest)
-2. Double-click the file — Claude Desktop opens and prompts for your settings
-3. Fill in your email provider details (see table below)
-4. Done — start chatting with Claude about your email
+| Tool | Description |
+|------|-------------|
+| `semantic_search` | Find emails by meaning using vector search |
+| `get_attachments` | Serve attachments from R2 (no IMAP call) |
+| `sync_now` | Trigger an immediate sync cycle |
+| `sync_status` | Check progress, per-folder stats, errors |
+| `find_by_thread` | Find thread by Message-ID or subject |
 
-### Developer install
+## Deploy
+
+### Prerequisites
+
+- A [Cloudflare account](https://dash.cloudflare.com/sign-up) (free tier works)
+- [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) (`npm install -g wrangler`)
+- IMAP/SMTP credentials for your email provider
+
+### Setup (~5 minutes)
 
 ```bash
 git clone https://github.com/Phantazein-apps/epistole
 cd epistole
-uv sync
-uv run mcp_server.py
+npm install
+./setup.sh
 ```
 
-Or with environment variables:
+The setup script creates D1, R2, Vectorize, and initializes the schema. Then set your secrets:
 
 ```bash
-export IMAP_HOST=imap.migadu.com
-export IMAP_USERNAME=you@example.com
-export IMAP_PASSWORD=your-password
-export SMTP_HOST=smtp.migadu.com
-export SMTP_USERNAME=you@example.com
-export SMTP_PASSWORD=your-password
-export EMAIL_ADDRESS=you@example.com
-export FULL_NAME="Your Name"
-uv run mcp_server.py
+wrangler secret put IMAP_HOST       # e.g. imap.migadu.com
+wrangler secret put IMAP_PORT       # e.g. 993
+wrangler secret put IMAP_USER       # e.g. you@example.com
+wrangler secret put IMAP_PASS       # your password
+wrangler secret put SMTP_HOST       # e.g. smtp.migadu.com
+wrangler secret put SMTP_PORT       # e.g. 465
+wrangler secret put SMTP_USER       # e.g. you@example.com
+wrangler secret put SMTP_PASS       # your password
+wrangler secret put EMAIL_ADDRESS   # e.g. you@example.com
+wrangler secret put FULL_NAME       # e.g. Your Name
+wrangler secret put MCP_TOKEN       # any random string — this is your auth token
 ```
 
-## Configuration
+Deploy:
 
-All values are stored securely in your OS keychain when installed via `.mcpb`.
+```bash
+wrangler deploy
+```
 
-| Field | Example | Notes |
-|-------|---------|-------|
-| Email Address | `you@example.com` | Your full email address |
-| Full Name | `Your Name` | Appears in the From header of sent emails |
-| IMAP Host | `imap.migadu.com` | Your provider's IMAP server |
-| IMAP Port | `993` | Default for TLS — rarely needs changing |
-| IMAP Username | `you@example.com` | Usually same as email address |
-| IMAP Password | ••••••••• | App password recommended |
-| SMTP Host | `smtp.migadu.com` | Your provider's SMTP server |
-| SMTP Port | `465` | Default for SSL — rarely needs changing |
-| SMTP Username | `you@example.com` | Usually same as email address |
-| SMTP Password | ••••••••• | App password recommended |
-| Sync Folders | *(empty)* | Comma-separated; empty = all folders |
-| Sync Interval | `15` | Minutes between background polls |
+### Connect to Claude Desktop
 
-### Provider Quick Reference
+Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "email": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://email-mcp.YOUR-SUBDOMAIN.workers.dev/mcp",
+        "--header",
+        "Authorization: Bearer YOUR_MCP_TOKEN"
+      ]
+    }
+  }
+}
+```
+
+Replace `YOUR-SUBDOMAIN` and `YOUR_MCP_TOKEN` with your values.
+
+## Provider Quick Reference
 
 | Provider | IMAP Host | SMTP Host | Notes |
 |----------|-----------|-----------|-------|
-| **Migadu** | `imap.migadu.com` | `smtp.migadu.com` | Use full email as username |
+| **Migadu** | `imap.migadu.com` | `smtp.migadu.com` | Full email as username |
 | **Fastmail** | `imap.fastmail.com` | `smtp.fastmail.com` | App password required |
 | **Gmail** | `imap.gmail.com` | `smtp.gmail.com` | [App password](https://myaccount.google.com/apppasswords) required |
-| **Outlook/Hotmail** | `outlook.office365.com` | `smtp.office365.com` | Port 587 for SMTP |
+| **Outlook** | `outlook.office365.com` | `smtp.office365.com` | Port 587 for SMTP |
 | **Yahoo** | `imap.mail.yahoo.com` | `smtp.mail.yahoo.com` | App password required |
-| **ProtonMail** | `127.0.0.1` | `127.0.0.1` | Requires [ProtonMail Bridge](https://proton.me/mail/bridge) |
 | **iCloud** | `imap.mail.me.com` | `smtp.mail.me.com` | App password required |
 
-## Sync Behavior
+## How Sync Works
 
-On startup, Epistole spawns a background task that:
+A cron trigger runs every 15 minutes:
 
-1. Connects to IMAP and lists folders (or uses `EPISTOLE_SYNC_FOLDERS` if set)
-2. For each folder, checks UIDVALIDITY and fetches new messages since the last sync
-3. Saves attachments to `~/.epistole/attachments/<account>/<year>/<month>/`
-4. Extracts text from digital PDFs (scanned PDFs are logged but not OCR'd)
-5. Indexes messages into a local ChromaDB vector database
-6. Sleeps for the configured interval, then repeats
+1. Connects to IMAP, checks each folder for new messages (by UID)
+2. Fetches new messages, stores metadata in D1, attachments in R2
+3. Generates embeddings via Workers AI (`bge-base-en-v1.5`)
+4. Upserts vectors into Vectorize for semantic search
+5. Handles UIDVALIDITY changes (server rebuild) by re-indexing
 
-The first sync may take a while depending on your mailbox size. The embedding model (~30MB) is downloaded on first run.
+First sync after deployment: call `sync_now` to bootstrap. Subsequent syncs are automatic.
 
-### Environment Variables
+## Security
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `EPISTOLE_DATA_DIR` | `~/.epistole` | Base directory for all local data |
-| `EPISTOLE_SYNC_FOLDERS` | *(all)* | CSV of folders to sync |
-| `EPISTOLE_SYNC_INTERVAL_MINUTES` | `15` | Polling interval |
-| `EPISTOLE_EMBEDDING_MODEL` | `minishlab/potion-base-8M` | model2vec model name |
-| `EPISTOLE_MAX_BODY_CHARS` | `32000` | Max chars per document for embedding |
-| `EPISTOLE_AUTO_SYNC` | `true` | Set `false` to disable background sync |
+- **Credentials** stored as Worker secrets (encrypted at rest, never in code or logs)
+- **MCP endpoint** protected by bearer token authentication
+- **Single-tenant** — each user deploys their own Worker, no shared infrastructure
+- **No local data** — everything lives in your Cloudflare account
 
-## Troubleshooting
+## Cost
 
-### Sync is stuck or not starting
+| Service | Free tier | Typical personal use |
+|---------|-----------|---------------------|
+| Workers | 100K req/day | ~2K req/day |
+| D1 | 5GB, 5M reads/day | <1MB |
+| Workers AI | 10K neurons/day | ~6K neurons/mo |
+| Vectorize | 30M queried dims/mo | ~8M stored dims |
+| R2 | 10GB, 1M ops/mo | depends on attachments |
 
-Check `sync_status` — it shows whether a sync is running, recent errors, and per-folder progress. Common issues:
-
-- **Wrong credentials** — verify IMAP login works with another client
-- **Firewall** — ensure port 993 (IMAP) is reachable
-- **Folder name encoding** — some servers use non-ASCII folder names; set `EPISTOLE_SYNC_FOLDERS` explicitly
-
-### Force a full re-index
-
-```
-sync_now(full=True)
-```
-
-This drops the existing index and re-syncs all messages from scratch. Useful after upgrading Epistole or changing the embedding model.
-
-### Wipe all local data
-
-```bash
-rm -rf ~/.epistole
-```
-
-This removes the vector database, attachments, sync state, and logs. The next sync will rebuild everything.
-
-### Where does data live?
-
-```
-~/.epistole/
-├── chroma/                      # Vector database
-├── attachments/<account>/<yyyy>/<mm>/  # Saved attachments
-├── models/                      # Embedding model cache
-├── state.db                     # Per-folder sync state (SQLite)
-└── sync.log                     # Rotating log file
-```
-
-## Upgrading from v1
-
-v1 was a Node.js server. v2 is a complete rewrite in Python with semantic search. To upgrade:
-
-1. Uninstall the old bundle from Claude Desktop
-2. Download and install the new `epistole.mcpb`
-3. Re-enter your credentials (they're stored in the keychain under a new key)
-4. After the server starts, run `sync_now(full=True)` to bootstrap the search index
+**Personal use: $0/month.** Heavy use (50K+ messages, constant searching): ~$5–8/month (Workers Paid plan base).
 
 ## License
 
