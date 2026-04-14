@@ -304,21 +304,28 @@ if [ -n "$CUSTOM_DOMAIN" ]; then
 
   # Check if the root domain exists in the user's Cloudflare account
   info "Checking if ${ROOT_DOMAIN} is in your Cloudflare account..."
-  ZONE_CHECK=$(wrangler dns list-zones 2>&1 || true)
 
-  if echo "$ZONE_CHECK" | grep -qi "$ROOT_DOMAIN"; then
+  # Extract OAuth token from wrangler config to query the CF API directly
+  WRANGLER_CONFIG="${HOME}/Library/Preferences/.wrangler/config/default.toml"
+  if [ ! -f "$WRANGLER_CONFIG" ]; then
+    WRANGLER_CONFIG="${HOME}/.wrangler/config/default.toml"
+  fi
+
+  ZONE_FOUND=false
+  if [ -f "$WRANGLER_CONFIG" ]; then
+    CF_TOKEN=$(grep -o 'oauth_token = "[^"]*"' "$WRANGLER_CONFIG" 2>/dev/null | cut -d'"' -f2)
+    if [ -n "$CF_TOKEN" ]; then
+      ZONE_RESULT=$(curl -s -H "Authorization: Bearer $CF_TOKEN" \
+        "https://api.cloudflare.com/client/v4/zones?name=${ROOT_DOMAIN}&status=active" 2>/dev/null)
+      if echo "$ZONE_RESULT" | grep -q "\"name\":\"${ROOT_DOMAIN}\""; then
+        ZONE_FOUND=true
+      fi
+    fi
+  fi
+
+  if [ "$ZONE_FOUND" = true ]; then
     ok "Zone found: $ROOT_DOMAIN"
   else
-    # Fallback: try the API directly via wrangler
-    ZONE_API=$(node -e "
-      const { execSync } = require('child_process');
-      try {
-        const out = execSync('wrangler whoami 2>&1', { encoding: 'utf8' });
-        console.log('auth_ok');
-      } catch { console.log('auth_fail'); }
-    " 2>/dev/null)
-
-    # Try deploying anyway — wrangler deploy will give a clear error if the domain isn't available
     warn "Could not verify ${ROOT_DOMAIN} in your Cloudflare zones."
     echo -e "  ${DIM}The domain's root zone (${ROOT_DOMAIN}) must be active in your Cloudflare account.${NC}"
     echo -e "  ${DIM}If it's not, the deploy will fail with a domain ownership error.${NC}"
