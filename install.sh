@@ -358,7 +358,14 @@ header "Deploying"
 
 DEPLOY_OUTPUT=$(wrangler deploy 2>&1)
 DEPLOY_EXIT=$?
-WORKER_URL=$(echo "$DEPLOY_OUTPUT" | grep -o 'https://[^ ]*\.workers\.dev' | head -1)
+
+# Detect URL — custom domain or workers.dev
+if [ -n "$CUSTOM_DOMAIN" ]; then
+  # Custom domain is configured — use it directly
+  WORKER_URL="https://${CUSTOM_DOMAIN}"
+else
+  WORKER_URL=$(echo "$DEPLOY_OUTPUT" | grep -o 'https://[^ ]*\.workers\.dev' | head -1)
+fi
 
 # Check for custom domain errors
 if [ $DEPLOY_EXIT -ne 0 ] && [ -n "$CUSTOM_DOMAIN" ]; then
@@ -408,12 +415,6 @@ if [ -z "$WORKER_URL" ]; then
 fi
 
 ok "Deployed to $WORKER_URL"
-
-# Use custom domain if set
-if [ -n "$CUSTOM_DOMAIN" ]; then
-  WORKER_URL="https://${CUSTOM_DOMAIN}"
-  ok "Custom domain active: $WORKER_URL"
-fi
 
 # ── Claude Desktop config ──────────────────────────────────────────────
 header "Claude Desktop configuration"
