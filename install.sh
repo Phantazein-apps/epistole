@@ -64,14 +64,15 @@ if ! command -v wrangler &>/dev/null; then
 fi
 ok "wrangler $(wrangler --version 2>&1 | head -1)"
 
-if ! wrangler whoami &>/dev/null 2>&1; then
+# Test with an actual API call — whoami can succeed with expired tokens
+if ! wrangler d1 list &>/dev/null 2>&1; then
   echo ""
-  warn "Not logged into Cloudflare."
+  warn "Cloudflare session expired or not logged in."
   info "Opening browser for login..."
   wrangler login
   echo ""
-  if ! wrangler whoami &>/dev/null 2>&1; then
-    fail "Cloudflare login failed. Run 'wrangler login' manually."
+  if ! wrangler d1 list &>/dev/null 2>&1; then
+    fail "Cloudflare login failed. Run 'wrangler login' and try again."
   fi
 fi
 ok "Cloudflare authenticated"
