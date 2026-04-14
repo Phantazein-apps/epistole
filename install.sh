@@ -221,6 +221,33 @@ set_secret "MCP_TOKEN" "$MCP_TOKEN"
 
 ok "All 11 secrets set (encrypted in Cloudflare)"
 
+# ── Custom domain ──────────────────────────────────────────────────────
+header "Custom domain (optional)"
+
+echo ""
+echo -e "  Your Worker will be available at a ${DIM}*.workers.dev${NC} URL by default."
+echo -e "  You can also point a custom domain to it (e.g. ${DIM}mail.yourdomain.com${NC})."
+echo -e "  The domain must already be on Cloudflare DNS."
+echo ""
+ask "Custom domain (leave empty to skip):"
+read CUSTOM_DOMAIN
+
+if [ -n "$CUSTOM_DOMAIN" ]; then
+  # Remove any protocol prefix
+  CUSTOM_DOMAIN=$(echo "$CUSTOM_DOMAIN" | sed 's|^https\?://||' | sed 's|/$||')
+
+  # Add route to wrangler.toml
+  if ! grep -q "custom_domain" wrangler.toml; then
+    cat >> wrangler.toml <<ROUTEEOF
+
+[[routes]]
+pattern = "${CUSTOM_DOMAIN}"
+custom_domain = true
+ROUTEEOF
+  fi
+  ok "Custom domain: $CUSTOM_DOMAIN"
+fi
+
 # ── Deploy ──────────────────────────────────────────────────────────────
 header "Deploying"
 
@@ -233,6 +260,12 @@ if [ -z "$WORKER_URL" ]; then
 fi
 
 ok "Deployed to $WORKER_URL"
+
+# Use custom domain if set
+if [ -n "$CUSTOM_DOMAIN" ]; then
+  WORKER_URL="https://${CUSTOM_DOMAIN}"
+  ok "Custom domain active: $WORKER_URL"
+fi
 
 # ── Claude Desktop config ──────────────────────────────────────────────
 header "Claude Desktop configuration"
