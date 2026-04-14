@@ -1,0 +1,11 @@
+IMAP_HOST=imap.migadu.com
+IMAP_PORT=993
+IMAP_USER=you@example.com
+IMAP_PASS=your-password
+SMTP_HOST=smtp.migadu.com
+SMTP_PORT=465
+SMTP_USER=you@example.com
+SMTP_PASS=your-password
+EMAIL_ADDRESS=you@example.com
+FULL_NAME=Your Name
+MCP_TOKEN=change-me-to-a-random-string

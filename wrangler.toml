@@ -1,0 +1,26 @@
+name = "email-mcp"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+[triggers]
+crons = ["*/15 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "email-mcp"
+database_id = ""
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "email-attachments"
+
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "email-embeddings"
+
+[ai]
+binding = "AI"

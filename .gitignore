@@ -1,8 +1,5 @@
-*.mcpb
-.DS_Store
 node_modules/
-.venv/
-__pycache__/
-*.egg-info/
-uv.lock
-.pytest_cache/
+.wrangler/
+.dev.vars
+dist/
+.DS_Store
