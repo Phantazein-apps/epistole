@@ -5,6 +5,7 @@ export interface Env {
   VECTORIZE: VectorizeIndex;
   AI: Ai;
   MCP_AGENT: DurableObjectNamespace;
+  OAUTH_KV: KVNamespace;
 
   // Secrets
   IMAP_HOST: string;
@@ -17,7 +18,7 @@ export interface Env {
   SMTP_PASS: string;
   EMAIL_ADDRESS: string;
   FULL_NAME: string;
-  MCP_TOKEN: string;
+  AUTH_PASSWORD: string;
 }
 
 export interface EmailMeta {

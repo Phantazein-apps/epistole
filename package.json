@@ -9,8 +9,10 @@
     "setup": "bash setup.sh"
   },
   "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.4.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
-    "agents": "^0.0.86"
+    "agents": "^0.0.86",
+    "hono": "^4.12.12"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250410.0",

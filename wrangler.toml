@@ -22,6 +22,10 @@ bucket_name = "email-attachments"
 binding = "VECTORIZE"
 index_name = "email-embeddings"
 
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "936b12718acb48e6a253d2dc668bf4b2"
+
 [ai]
 binding = "AI"
 

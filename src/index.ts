@@ -1,21 +1,33 @@
 /**
  * Epistole — Remote email MCP server on Cloudflare Workers.
  *
+ * Auth: OAuth 2.1 with PKCE via @cloudflare/workers-oauth-provider.
+ * Login: Single-user password form (set during setup).
+ *
  * Entry points:
- *   fetch()     → MCP over Streamable HTTP (/mcp)
- *   scheduled() → cron-triggered IMAP sync
+ *   OAuthProvider (default export) → handles /authorize, /token, /register, /mcp
+ *   scheduled()                    → cron-triggered IMAP sync
  */
 
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { registerLiveTools } from "./tools/live.js";
 import { registerSearchTools } from "./tools/search.js";
 import { runIncrementalSync } from "./sync/incremental.js";
+import authHandler from "./auth-handler.js";
 import type { Env } from "./types.js";
+
+// ── User props passed through OAuth ───────────────────────────────────────
+
+type Props = {
+  email: string;
+  name: string;
+};
 
 // ── MCP Agent (Durable Object) ────────────────────────────────────────────
 
-export class EmailMcpAgent extends McpAgent<Env> {
+export class EmailMcpAgent extends McpAgent<Env, Record<string, never>, Props> {
   server = new McpServer({
     name: "epistole",
     version: "3.0.0",
@@ -27,77 +39,62 @@ export class EmailMcpAgent extends McpAgent<Env> {
   }
 }
 
-// ── Worker ─────────────────────────────────────────────────────────────────
+// ── Worker (OAuthProvider is the default export) ──────────────────────────
 
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
+export default new OAuthProvider({
+  apiRoute: "/mcp",
+  apiHandler: EmailMcpAgent.serve("/mcp"),
+  defaultHandler: authHandler,
+  authorizeEndpoint: "/authorize",
+  tokenEndpoint: "/token",
+  clientRegistrationEndpoint: "/register",
+});
 
-    // Health check — no auth required
-    if (url.pathname === "/health") {
-      return new Response("ok");
-    }
+// ── Cron handler (separate export, not routed through OAuth) ──────────────
 
-    // Everything under /mcp requires bearer token auth
-    if (url.pathname === "/mcp" || url.pathname.startsWith("/mcp/")) {
-      const auth = request.headers.get("Authorization");
-      if (!auth || auth !== `Bearer ${env.MCP_TOKEN}`) {
-        return new Response("Unauthorized", { status: 401 });
-      }
+export const scheduled: ExportedHandlerScheduledHandler<Env> = async (
+  event,
+  env,
+  ctx
+) => {
+  ctx.waitUntil(
+    (async () => {
+      console.log("Cron sync starting...");
 
-      // Route to the Durable Object via Agents SDK
-      const agentId = env.MCP_AGENT.idFromName("default");
-      const agent = env.MCP_AGENT.get(agentId);
+      const jobId = crypto.randomUUID().substring(0, 8);
+      await env.DB.prepare(
+        "INSERT INTO sync_jobs (job_id, status, started_at, folders, full_sync) VALUES (?, 'running', ?, 'all', 0)"
+      )
+        .bind(jobId, new Date().toISOString())
+        .run();
 
-      // Strip the /mcp prefix — the agent expects paths relative to its root
-      const agentUrl = new URL(request.url);
-      agentUrl.pathname = agentUrl.pathname.replace(/^\/mcp/, "") || "/";
+      try {
+        const results = await runIncrementalSync(env);
+        const totalNew = results.reduce((s, r) => s + r.newMessages, 0);
+        const errors = results.flatMap((r) => r.errors);
 
-      const agentRequest = new Request(agentUrl.toString(), request);
-      return agent.fetch(agentRequest);
-    }
-
-    return new Response("Not Found", { status: 404 });
-  },
-
-  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(
-      (async () => {
-        console.log("Cron sync starting...");
-
-        const jobId = crypto.randomUUID().substring(0, 8);
         await env.DB.prepare(
-          "INSERT INTO sync_jobs (job_id, status, started_at, folders, full_sync) VALUES (?, 'running', ?, 'all', 0)"
+          "UPDATE sync_jobs SET status = 'completed', finished_at = ?, error = ? WHERE job_id = ?"
         )
-          .bind(jobId, new Date().toISOString())
+          .bind(
+            new Date().toISOString(),
+            errors.length > 0 ? errors.join("; ") : null,
+            jobId
+          )
           .run();
 
-        try {
-          const results = await runIncrementalSync(env);
-          const totalNew = results.reduce((s, r) => s + r.newMessages, 0);
-          const errors = results.flatMap((r) => r.errors);
+        console.log(
+          `Cron sync complete: ${totalNew} new messages across ${results.length} folders`
+        );
+      } catch (err: any) {
+        await env.DB.prepare(
+          "UPDATE sync_jobs SET status = 'failed', finished_at = ?, error = ? WHERE job_id = ?"
+        )
+          .bind(new Date().toISOString(), err.message, jobId)
+          .run();
 
-          await env.DB.prepare(
-            "UPDATE sync_jobs SET status = 'completed', finished_at = ?, error = ? WHERE job_id = ?"
-          )
-            .bind(
-              new Date().toISOString(),
-              errors.length > 0 ? errors.join("; ") : null,
-              jobId
-            )
-            .run();
-
-          console.log(`Cron sync complete: ${totalNew} new messages across ${results.length} folders`);
-        } catch (err: any) {
-          await env.DB.prepare(
-            "UPDATE sync_jobs SET status = 'failed', finished_at = ?, error = ? WHERE job_id = ?"
-          )
-            .bind(new Date().toISOString(), err.message, jobId)
-            .run();
-
-          console.error("Cron sync failed:", err.message);
-        }
-      })()
-    );
-  },
+        console.error("Cron sync failed:", err.message);
+      }
+    })()
+  );
 };
