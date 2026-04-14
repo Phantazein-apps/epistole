@@ -151,6 +151,9 @@ fi
 
 secret "Email password:"
 EMAIL_PASS="$REPLY"
+if [ -z "$EMAIL_PASS" ]; then
+  fail "Email password cannot be empty."
+fi
 
 SMTP_USER="$IMAP_USER"
 SMTP_PASS="$EMAIL_PASS"
@@ -163,6 +166,9 @@ echo -e "  ${DIM}enter when connecting from Claude Desktop, claude.ai, or mobile
 echo ""
 secret "Epistole login password:"
 AUTH_PASSWORD="$REPLY"
+if [ -z "$AUTH_PASSWORD" ]; then
+  fail "Login password cannot be empty."
+fi
 
 # ── Validate IMAP credentials ──────────────────────────────────────────
 header "Validating credentials"
@@ -225,12 +231,23 @@ fi
 # ── Create Cloudflare resources ─────────────────────────────────────────
 header "Creating Cloudflare resources"
 
+# Helper: extract a UUID from wrangler output (handles various formats)
+extract_uuid() {
+  echo "$1" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1
+}
+extract_hex32() {
+  echo "$1" | grep -oE '[0-9a-f]{32}' | head -1
+}
+
 # D1
 info "Creating D1 database..."
 D1_OUTPUT=$(wrangler d1 create email-mcp 2>&1) || true
-D1_ID=$(echo "$D1_OUTPUT" | grep -o 'database_id = "[^"]*"' | head -1 | cut -d'"' -f2)
+D1_ID=$(extract_uuid "$D1_OUTPUT")
 if [ -z "$D1_ID" ]; then
-  D1_ID=$(wrangler d1 list 2>&1 | grep email-mcp | grep -o '[0-9a-f-]\{36\}' | head -1)
+  # Already exists — look it up
+  info "D1 may already exist, looking up ID..."
+  D1_LIST=$(wrangler d1 list 2>&1)
+  D1_ID=$(echo "$D1_LIST" | grep -B2 -A2 "email-mcp" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
 fi
 if [ -n "$D1_ID" ]; then
   if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -238,9 +255,9 @@ if [ -n "$D1_ID" ]; then
   else
     sed -i "s/database_id = \"[^\"]*\"/database_id = \"$D1_ID\"/" wrangler.toml
   fi
-  ok "D1 database ready"
+  ok "D1 database ready ($D1_ID)"
 else
-  warn "Could not determine D1 ID — check wrangler.toml manually"
+  fail "Could not create or find D1 database 'email-mcp'. Run 'wrangler d1 create email-mcp' manually."
 fi
 
 # D1 schema
@@ -261,28 +278,37 @@ ok "Vectorize index ready"
 # KV (for OAuth state)
 info "Creating KV namespace for OAuth..."
 KV_OUTPUT=$(wrangler kv namespace create email-mcp-oauth 2>&1) || true
-KV_ID=$(echo "$KV_OUTPUT" | grep -o 'id = "[^"]*"' | head -1 | cut -d'"' -f2)
+KV_ID=$(extract_hex32 "$KV_OUTPUT")
 if [ -z "$KV_ID" ]; then
-  KV_ID=$(wrangler kv namespace list 2>&1 | grep -A1 email-mcp-oauth | grep -o '[0-9a-f]\{32\}' | head -1)
+  # Already exists — look it up
+  info "KV may already exist, looking up ID..."
+  KV_LIST=$(wrangler kv namespace list 2>&1)
+  KV_ID=$(echo "$KV_LIST" | grep -B2 -A2 "email-mcp-oauth" | grep -oE '[0-9a-f]{32}' | head -1)
 fi
 if [ -n "$KV_ID" ]; then
+  # Only replace the KV id line (not the D1 database_id line)
   if [[ "$OSTYPE" == "darwin"* ]]; then
-    sed -i '' "s/id = \"[^\"]*\"/id = \"$KV_ID\"/" wrangler.toml
+    sed -i '' "/OAUTH_KV/,/^$/{s/id = \"[^\"]*\"/id = \"$KV_ID\"/;}" wrangler.toml
   else
-    sed -i "s/id = \"[^\"]*\"/id = \"$KV_ID\"/" wrangler.toml
+    sed -i "/OAUTH_KV/,/^$/{s/id = \"[^\"]*\"/id = \"$KV_ID\"/;}" wrangler.toml
   fi
-  ok "KV namespace ready"
+  ok "KV namespace ready ($KV_ID)"
 else
-  warn "Could not determine KV ID — check wrangler.toml manually"
+  fail "Could not create or find KV namespace 'email-mcp-oauth'. Run 'wrangler kv namespace create email-mcp-oauth' manually."
 fi
 
 # ── Set secrets ─────────────────────────────────────────────────────────
 header "Setting secrets"
 
 set_secret() {
-  echo "$2" | wrangler secret put "$1" &>/dev/null 2>&1
-  ok "$1"
+  if echo "$2" | wrangler secret put "$1" &>/dev/null 2>&1; then
+    ok "$1"
+  else
+    warn "$1 — failed to set, will retry after deploy"
+    SECRETS_FAILED=true
+  fi
 }
+SECRETS_FAILED=false
 
 set_secret "IMAP_HOST" "$IMAP_HOST"
 set_secret "IMAP_PORT" "$IMAP_PORT"
