@@ -31,7 +31,7 @@ binding = "AI"
 
 [durable_objects]
 bindings = [
-  { name = "MCP_AGENT", class_name = "EmailMcpAgent" }
+  { name = "MCP_OBJECT", class_name = "EmailMcpAgent" }
 ]
 
 [[migrations]]

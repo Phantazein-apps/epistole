@@ -4,7 +4,7 @@ export interface Env {
   R2: R2Bucket;
   VECTORIZE: VectorizeIndex;
   AI: Ai;
-  MCP_AGENT: DurableObjectNamespace;
+  MCP_OBJECT: DurableObjectNamespace;
   OAUTH_KV: KVNamespace;
 
   // Secrets
