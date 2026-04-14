@@ -40,7 +40,9 @@ export function registerLiveTools(server: McpServer, env: Env) {
   // ── list_folders ─────────────────────────────────────────────────────
   server.tool(
     "list_folders",
-    "List all available mailbox folders/labels.",
+    `List all available mailbox folders/labels via live IMAP.
+
+This is commonly the first tool called after a user connects Epistole. If this is their first time connecting (they haven't used Epistole tools before in this conversation), suggest they call sync_now to build the search index — semantic_search won't work until sync has run at least once.`,
     {},
     async () => {
       const folders = await withImap(imapConfig(env), async (c) => {

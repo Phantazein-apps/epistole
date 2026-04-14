@@ -11,7 +11,11 @@ export function registerSearchTools(server: McpServer, env: Env) {
   // ── semantic_search ──────────────────────────────────────────────────
   server.tool(
     "semantic_search",
-    "Search emails by meaning using semantic vector search. Finds messages whose content is semantically similar to the query, searching across subject, body, and PDF attachment text.",
+    `Search emails by meaning using local vector search. Finds messages whose content is semantically similar to the query (subject, body, and PDF text).
+
+Requires prior sync via sync_now. If this returns zero results and currently_indexed=0, the user has not yet run sync_now. Tell them to do so.
+
+For finding emails when you know specific terms/dates, prefer search_messages (IMAP-level search). Use semantic_search for concept-based queries like "emails about the contract renewal" or "messages about Q4 revenue".`,
     {
       query: z.string().describe("Natural language search query"),
       folders: z.string().optional().describe("Comma-separated folder names to restrict search"),
@@ -94,7 +98,20 @@ export function registerSearchTools(server: McpServer, env: Env) {
         "SELECT * FROM sync_jobs WHERE status = 'running' LIMIT 1"
       ).first();
 
-      const result: any = { query, total: messages.length, messages };
+      // Check if anything has been indexed yet
+      const indexedRow = await env.DB.prepare("SELECT COUNT(*) as cnt FROM emails").first<{ cnt: number }>();
+      const currentlyIndexed = indexedRow?.cnt || 0;
+
+      const result: any = {
+        query,
+        total: messages.length,
+        messages,
+        currently_indexed: currentlyIndexed,
+      };
+
+      if (currentlyIndexed === 0) {
+        result._notice = "No emails have been indexed yet. Run sync_now first to populate the search index.";
+      }
       if (runningJob) {
         result._notice = `> Note: sync in progress. Results may be incomplete.`;
       }
@@ -153,71 +170,90 @@ export function registerSearchTools(server: McpServer, env: Env) {
   // ── sync_now ─────────────────────────────────────────────────────────
   server.tool(
     "sync_now",
-    "Trigger an immediate email sync cycle. Returns immediately with a job ID; sync runs in the background.",
+    `Trigger an email sync. Fetches messages from IMAP, extracts text and attachments, generates embeddings, and indexes into the local vector database.
+
+IMPORTANT for first-time users: This MUST be run once after connecting Epistole before semantic_search will return any results. semantic_search only searches the local index built by this tool.
+
+Returns immediately with a job ID. Sync runs in the background — check progress with sync_status. A first sync on a mailbox with thousands of messages can take 5-30 minutes. The cron trigger also runs this automatically every 15 minutes.
+
+After calling this, tell the user:
+1. Sync has started in the background
+2. They can ask "what's my email sync status?" to check progress
+3. They don't need to keep Claude open — it runs on Cloudflare
+4. Semantic search will be available once sync completes (usually 1-5 min for first batch of messages)`,
     {
       folders: z.string().optional().describe("Comma-separated folder names (default: all)"),
       full: z.boolean().default(false).describe("Re-index everything if true"),
     },
-    async ({ folders, full }, { sendNotification }) => {
+    async ({ folders, full }) => {
       const jobId = crypto.randomUUID().substring(0, 8);
       const folderList = folders
         ? folders.split(",").map((f) => f.trim())
         : undefined;
 
-      // Record job
+      // Record job as running
       await env.DB.prepare(
         "INSERT INTO sync_jobs (job_id, status, started_at, folders, full_sync) VALUES (?, 'running', ?, ?, ?)"
       )
         .bind(jobId, new Date().toISOString(), folders || "all", full ? 1 : 0)
         .run();
 
-      // Run sync (this will block but that's OK for a tool call)
-      try {
-        const results = await runIncrementalSync(env, { folders: folderList, full });
-        const totalNew = results.reduce((s, r) => s + r.newMessages, 0);
-        const allErrors = results.flatMap((r) => r.errors);
+      // Fire-and-forget: run the sync in the background so we return immediately
+      // Durable Object keeps the promise alive past the tool response
+      const runInBackground = (async () => {
+        try {
+          const results = await runIncrementalSync(env, { folders: folderList, full });
+          const totalNew = results.reduce((s, r) => s + r.newMessages, 0);
+          const allErrors = results.flatMap((r) => r.errors);
 
-        await env.DB.prepare(
-          "UPDATE sync_jobs SET status = 'completed', finished_at = ?, error = ? WHERE job_id = ?"
-        )
-          .bind(
-            new Date().toISOString(),
-            allErrors.length > 0 ? allErrors.join("; ") : null,
-            jobId
+          await env.DB.prepare(
+            "UPDATE sync_jobs SET status = 'completed', finished_at = ?, error = ? WHERE job_id = ?"
           )
-          .run();
+            .bind(
+              new Date().toISOString(),
+              allErrors.length > 0 ? allErrors.join("; ").slice(0, 500) : null,
+              jobId
+            )
+            .run();
 
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                job_id: jobId,
-                status: "completed",
-                full,
-                folders: folderList || "all",
-                new_messages: totalNew,
-                errors: allErrors.slice(0, 5),
-              }),
-            },
-          ],
-        };
-      } catch (err: any) {
-        await env.DB.prepare(
-          "UPDATE sync_jobs SET status = 'failed', finished_at = ?, error = ? WHERE job_id = ?"
-        )
-          .bind(new Date().toISOString(), err.message, jobId)
-          .run();
+          console.log(`Sync ${jobId} complete: ${totalNew} new messages`);
+        } catch (err: any) {
+          await env.DB.prepare(
+            "UPDATE sync_jobs SET status = 'failed', finished_at = ?, error = ? WHERE job_id = ?"
+          )
+            .bind(new Date().toISOString(), err.message?.slice(0, 500) || "unknown", jobId)
+            .run();
 
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ job_id: jobId, status: "failed", error: err.message }),
-            },
-          ],
-        };
-      }
+          console.error(`Sync ${jobId} failed:`, err.message);
+        }
+      })();
+
+      // Don't await — let it keep running
+      runInBackground.catch(() => {}); // swallow unhandled rejection
+
+      const indexedRow = await env.DB.prepare("SELECT COUNT(*) as cnt FROM emails").first<{ cnt: number }>();
+      const currentlyIndexed = indexedRow?.cnt || 0;
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "started",
+              job_id: jobId,
+              message: `Email sync started in the background. ${currentlyIndexed === 0 ? "This is your first sync — it may take a few minutes to complete." : `Currently ${currentlyIndexed} messages indexed. New messages will be added.`}`,
+              full_resync: full,
+              folders: folderList || "all folders",
+              currently_indexed: currentlyIndexed,
+              next_steps: [
+                "Sync runs in the background on Cloudflare — you can close Claude Desktop",
+                "Call sync_status to check progress",
+                "Once complete, use semantic_search to find emails by meaning",
+              ],
+            }),
+          },
+        ],
+      };
     }
   );
 
