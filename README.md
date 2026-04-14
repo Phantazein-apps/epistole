@@ -4,6 +4,24 @@
 
 A **remote MCP server** that connects Claude to your email over IMAP/SMTP, with semantic search powered by Cloudflare's AI stack. Runs as a single Cloudflare Worker — nothing installed locally.
 
+## Install
+
+You need a [Cloudflare account](https://dash.cloudflare.com/sign-up) (free) and [Node.js](https://nodejs.org). Then:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Phantazein-apps/epistole/master/install.sh | bash
+```
+
+The installer will:
+1. Check dependencies and log you into Cloudflare if needed
+2. Ask for your email provider, address, and password
+3. Create all Cloudflare resources (D1, R2, Vectorize)
+4. Set credentials as encrypted Worker secrets
+5. Deploy the Worker
+6. Configure Claude Desktop automatically
+
+After it finishes, restart Claude Desktop and ask Claude to show your emails.
+
 ## Architecture
 
 ```
@@ -45,48 +63,20 @@ All email data stays in your own Cloudflare account. No third-party services. $0
 | `sync_status` | Check progress, per-folder stats, errors |
 | `find_by_thread` | Find thread by Message-ID or subject |
 
-## Deploy
+## Manual Deploy
 
-### Prerequisites
-
-- A [Cloudflare account](https://dash.cloudflare.com/sign-up) (free tier works)
-- [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) (`npm install -g wrangler`)
-- IMAP/SMTP credentials for your email provider
-
-### Setup (~5 minutes)
+If you prefer not to use the one-liner, or it doesn't work on your platform:
 
 ```bash
 git clone https://github.com/Phantazein-apps/epistole
 cd epistole
 npm install
-./setup.sh
+./setup.sh                          # creates D1, R2, Vectorize
+npx wrangler secret put IMAP_HOST   # repeat for all 11 secrets
+npx wrangler deploy
 ```
 
-The setup script creates D1, R2, Vectorize, and initializes the schema. Then set your secrets:
-
-```bash
-wrangler secret put IMAP_HOST       # e.g. imap.migadu.com
-wrangler secret put IMAP_PORT       # e.g. 993
-wrangler secret put IMAP_USER       # e.g. you@example.com
-wrangler secret put IMAP_PASS       # your password
-wrangler secret put SMTP_HOST       # e.g. smtp.migadu.com
-wrangler secret put SMTP_PORT       # e.g. 465
-wrangler secret put SMTP_USER       # e.g. you@example.com
-wrangler secret put SMTP_PASS       # your password
-wrangler secret put EMAIL_ADDRESS   # e.g. you@example.com
-wrangler secret put FULL_NAME       # e.g. Your Name
-wrangler secret put MCP_TOKEN       # any random string — this is your auth token
-```
-
-Deploy:
-
-```bash
-wrangler deploy
-```
-
-### Connect to Claude Desktop
-
-Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+Then add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -103,8 +93,6 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
   }
 }
 ```
-
-Replace `YOUR-SUBDOMAIN` and `YOUR_MCP_TOKEN` with your values.
 
 ## Provider Quick Reference
 
