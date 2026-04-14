@@ -39,20 +39,16 @@ app.get("/authorize", async (c) => {
     { expirationTtl: CODE_TTL + 60 }
   );
 
-  return c.html(emailPage(stateId, null));
+  const email = c.env.EMAIL_ADDRESS || "";
+  return c.html(confirmPage(stateId, email, null));
 });
 
 // ── Step 2: Send verification code ─────────────────────────────────────
 
 app.post("/authorize", async (c) => {
   const body = await c.req.parseBody();
-  const email = (body.email as string || "").trim().toLowerCase();
   const stateId = body.state as string;
-
-  // Verify the email matches the configured account
-  if (email !== c.env.EMAIL_ADDRESS.toLowerCase()) {
-    return c.html(emailPage(stateId, "This email doesn't match the account connected to this server."));
-  }
+  const email = c.env.EMAIL_ADDRESS.toLowerCase();
 
   // Check OAuth state is valid
   const stored = await c.env.OAUTH_KV.get(`oauth:state:${stateId}`);
@@ -74,7 +70,7 @@ app.post("/authorize", async (c) => {
   try {
     await sendVerificationEmail(c.env, email, code);
   } catch (err: any) {
-    return c.html(emailPage(stateId, `Failed to send verification email: ${err.message}`));
+    return c.html(confirmPage(stateId, email, `Failed to send verification email: ${err.message}`));
   }
 
   return c.html(codePage(stateId, email, null));
@@ -260,7 +256,10 @@ const STYLES = `
   .sent { text-align: center; color: #4ade80; font-size: 0.85rem; margin-bottom: 1.5rem; }
 `;
 
-function emailPage(stateId: string, error: string | null): string {
+function confirmPage(stateId: string, email: string, error: string | null): string {
+  const maskedEmail = email.replace(/^(.)(.*)(@.*)$/, (_, first, middle, domain) =>
+    first + middle.replace(/./g, "\u2022") + domain
+  );
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -273,15 +272,16 @@ function emailPage(stateId: string, error: string | null): string {
   <div class="card">
     <div class="logo">&#9993;</div>
     <h1>Epistole</h1>
-    <p class="subtitle">Verify you own this email account</p>
+    <p class="subtitle">Claude is requesting access to your email</p>
+    <p style="text-align:center; color:#ccc; font-size:0.9rem; margin-bottom:1.5rem;">
+      To verify you own this inbox, we'll send a<br>one-time code to <strong>${maskedEmail}</strong>
+    </p>
     ${error ? `<div class="error">${error}</div>` : ""}
     <form method="POST" action="/authorize">
       <input type="hidden" name="state" value="${stateId}">
-      <label for="email">Email address</label>
-      <input type="email" id="email" name="email" placeholder="you@example.com" autofocus required>
       <button type="submit">Send verification code</button>
     </form>
-    <p class="note">We'll send a 6-digit code to verify you can read this inbox.</p>
+    <p class="note">The code expires in 5 minutes. No password is stored.</p>
   </div>
 </body>
 </html>`;

@@ -2,11 +2,11 @@
  * Epistole — Remote email MCP server on Cloudflare Workers.
  *
  * Auth: OAuth 2.1 with PKCE via @cloudflare/workers-oauth-provider.
- * Login: Single-user password form (set during setup).
+ * Login: Email verification code (magic link).
  *
  * Entry points:
- *   OAuthProvider (default export) → handles /authorize, /token, /register, /mcp
- *   scheduled()                    → cron-triggered IMAP sync
+ *   fetch()     → OAuthProvider handles /authorize, /token, /register, /mcp
+ *   scheduled() → cron-triggered IMAP sync
  */
 
 import { McpAgent } from "agents/mcp";
@@ -39,9 +39,9 @@ export class EmailMcpAgent extends McpAgent<Env, Record<string, never>, Props> {
   }
 }
 
-// ── Worker (OAuthProvider is the default export) ──────────────────────────
+// ── OAuthProvider (handles fetch) ─────────────────────────────────────────
 
-export default new OAuthProvider({
+const oauthProvider = new OAuthProvider({
   apiRoute: "/mcp",
   apiHandler: EmailMcpAgent.serve("/mcp"),
   defaultHandler: authHandler,
@@ -50,51 +50,60 @@ export default new OAuthProvider({
   clientRegistrationEndpoint: "/register",
 });
 
-// ── Cron handler (separate export, not routed through OAuth) ──────────────
+// ── Worker default export (fetch + scheduled) ─────────────────────────────
 
-export const scheduled: ExportedHandlerScheduledHandler<Env> = async (
-  event,
-  env,
-  ctx
-) => {
-  ctx.waitUntil(
-    (async () => {
-      console.log("Cron sync starting...");
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // Health check — bypass OAuth
+    const url = new URL(request.url);
+    if (url.pathname === "/health") {
+      return new Response("ok");
+    }
 
-      const jobId = crypto.randomUUID().substring(0, 8);
-      await env.DB.prepare(
-        "INSERT INTO sync_jobs (job_id, status, started_at, folders, full_sync) VALUES (?, 'running', ?, 'all', 0)"
-      )
-        .bind(jobId, new Date().toISOString())
-        .run();
+    // Everything else goes through OAuthProvider
+    return oauthProvider.fetch(request, env, ctx);
+  },
 
-      try {
-        const results = await runIncrementalSync(env);
-        const totalNew = results.reduce((s, r) => s + r.newMessages, 0);
-        const errors = results.flatMap((r) => r.errors);
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      (async () => {
+        console.log("Cron sync starting...");
 
+        const jobId = crypto.randomUUID().substring(0, 8);
         await env.DB.prepare(
-          "UPDATE sync_jobs SET status = 'completed', finished_at = ?, error = ? WHERE job_id = ?"
+          "INSERT INTO sync_jobs (job_id, status, started_at, folders, full_sync) VALUES (?, 'running', ?, 'all', 0)"
         )
-          .bind(
-            new Date().toISOString(),
-            errors.length > 0 ? errors.join("; ") : null,
-            jobId
+          .bind(jobId, new Date().toISOString())
+          .run();
+
+        try {
+          const results = await runIncrementalSync(env);
+          const totalNew = results.reduce((s, r) => s + r.newMessages, 0);
+          const errors = results.flatMap((r) => r.errors);
+
+          await env.DB.prepare(
+            "UPDATE sync_jobs SET status = 'completed', finished_at = ?, error = ? WHERE job_id = ?"
           )
-          .run();
+            .bind(
+              new Date().toISOString(),
+              errors.length > 0 ? errors.join("; ") : null,
+              jobId
+            )
+            .run();
 
-        console.log(
-          `Cron sync complete: ${totalNew} new messages across ${results.length} folders`
-        );
-      } catch (err: any) {
-        await env.DB.prepare(
-          "UPDATE sync_jobs SET status = 'failed', finished_at = ?, error = ? WHERE job_id = ?"
-        )
-          .bind(new Date().toISOString(), err.message, jobId)
-          .run();
+          console.log(
+            `Cron sync complete: ${totalNew} new messages across ${results.length} folders`
+          );
+        } catch (err: any) {
+          await env.DB.prepare(
+            "UPDATE sync_jobs SET status = 'failed', finished_at = ?, error = ? WHERE job_id = ?"
+          )
+            .bind(new Date().toISOString(), err.message, jobId)
+            .run();
 
-        console.error("Cron sync failed:", err.message);
-      }
-    })()
-  );
+          console.error("Cron sync failed:", err.message);
+        }
+      })()
+    );
+  },
 };

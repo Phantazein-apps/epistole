@@ -37,3 +37,7 @@ bindings = [
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["EmailMcpAgent"]
+
+[[routes]]
+pattern = "dk-mailstore.phantazein.com"
+custom_domain = true
