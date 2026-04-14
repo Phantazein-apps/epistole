@@ -164,10 +164,22 @@ echo -e "  ${DIM}Epistole uses OAuth so you can connect from any device.${NC}"
 echo -e "  ${DIM}Choose a password for the login page — this is what you'll${NC}"
 echo -e "  ${DIM}enter when connecting from Claude Desktop, claude.ai, or mobile.${NC}"
 echo ""
+echo -e "  ${RED}${BOLD}This password protects your entire email account.${NC}"
+echo -e "  ${RED}Anyone with it + your server URL can read, send, and${NC}"
+echo -e "  ${RED}delete your email. Use a strong, unique password.${NC}"
+echo ""
 secret "Epistole login password:"
 AUTH_PASSWORD="$REPLY"
 if [ -z "$AUTH_PASSWORD" ]; then
   fail "Login password cannot be empty."
+fi
+if [ ${#AUTH_PASSWORD} -lt 12 ]; then
+  warn "Password is short (${#AUTH_PASSWORD} chars). 12+ characters recommended."
+  ask "Continue with this password? [y/N]"
+  read SHORT_PW_OK
+  if [[ ! "$SHORT_PW_OK" =~ ^[Yy] ]]; then
+    fail "Aborted. Run the installer again with a stronger password."
+  fi
 fi
 
 # ── Validate IMAP credentials ──────────────────────────────────────────
