@@ -58,22 +58,25 @@ if ! command -v npx &>/dev/null; then
 fi
 ok "npx available"
 
-# Wrangler — install if missing
-if ! npx wrangler --version &>/dev/null 2>&1; then
-  info "Installing wrangler..."
-  npm install -g wrangler
+# Wrangler — install globally if not available
+if ! command -v wrangler &>/dev/null; then
+  info "Installing wrangler globally..."
+  npm install -g wrangler 2>&1 | tail -1
+  if ! command -v wrangler &>/dev/null; then
+    fail "wrangler install failed. Run 'npm install -g wrangler' manually."
+  fi
 fi
-ok "wrangler available"
+ok "wrangler $(wrangler --version 2>&1 | head -1)"
 
 # Check Cloudflare auth
-if ! npx wrangler whoami &>/dev/null 2>&1; then
+if ! wrangler whoami &>/dev/null 2>&1; then
   echo ""
   warn "Not logged into Cloudflare."
   info "Opening browser for login..."
-  npx wrangler login
+  wrangler login
   echo ""
-  if ! npx wrangler whoami &>/dev/null 2>&1; then
-    fail "Cloudflare login failed. Run 'npx wrangler login' manually."
+  if ! wrangler whoami &>/dev/null 2>&1; then
+    fail "Cloudflare login failed. Run 'wrangler login' manually."
   fi
 fi
 ok "Cloudflare authenticated"
@@ -168,10 +171,10 @@ header "Creating Cloudflare resources"
 
 # D1
 info "Creating D1 database..."
-D1_OUTPUT=$(npx wrangler d1 create email-mcp 2>&1) || true
+D1_OUTPUT=$(wrangler d1 create email-mcp 2>&1) || true
 D1_ID=$(echo "$D1_OUTPUT" | grep -o 'database_id = "[^"]*"' | head -1 | cut -d'"' -f2)
 if [ -z "$D1_ID" ]; then
-  D1_ID=$(npx wrangler d1 list 2>&1 | grep email-mcp | grep -o '[0-9a-f-]\{36\}' | head -1)
+  D1_ID=$(wrangler d1 list 2>&1 | grep email-mcp | grep -o '[0-9a-f-]\{36\}' | head -1)
 fi
 if [ -n "$D1_ID" ]; then
   if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -186,24 +189,24 @@ fi
 
 # D1 schema
 info "Initializing database schema..."
-npx wrangler d1 execute email-mcp --remote --file=schema.sql &>/dev/null || true
+wrangler d1 execute email-mcp --remote --file=schema.sql &>/dev/null || true
 ok "Schema initialized"
 
 # R2
 info "Creating R2 bucket..."
-npx wrangler r2 bucket create email-attachments &>/dev/null 2>&1 || true
+wrangler r2 bucket create email-attachments &>/dev/null 2>&1 || true
 ok "R2 bucket ready"
 
 # Vectorize
 info "Creating Vectorize index..."
-npx wrangler vectorize create email-embeddings --dimensions=768 --metric=cosine &>/dev/null 2>&1 || true
+wrangler vectorize create email-embeddings --dimensions=768 --metric=cosine &>/dev/null 2>&1 || true
 ok "Vectorize index ready"
 
 # ── Set secrets ─────────────────────────────────────────────────────────
 header "Setting secrets"
 
 set_secret() {
-  echo "$2" | npx wrangler secret put "$1" &>/dev/null 2>&1
+  echo "$2" | wrangler secret put "$1" &>/dev/null 2>&1
   ok "$1"
 }
 
@@ -241,7 +244,7 @@ if [ -n "$CUSTOM_DOMAIN" ]; then
 
   # Check if the root domain exists in the user's Cloudflare account
   info "Checking if ${ROOT_DOMAIN} is in your Cloudflare account..."
-  ZONE_CHECK=$(npx wrangler dns list-zones 2>&1 || true)
+  ZONE_CHECK=$(wrangler dns list-zones 2>&1 || true)
 
   if echo "$ZONE_CHECK" | grep -qi "$ROOT_DOMAIN"; then
     ok "Zone found: $ROOT_DOMAIN"
@@ -250,7 +253,7 @@ if [ -n "$CUSTOM_DOMAIN" ]; then
     ZONE_API=$(node -e "
       const { execSync } = require('child_process');
       try {
-        const out = execSync('npx wrangler whoami 2>&1', { encoding: 'utf8' });
+        const out = execSync('wrangler whoami 2>&1', { encoding: 'utf8' });
         console.log('auth_ok');
       } catch { console.log('auth_fail'); }
     " 2>/dev/null)
@@ -286,7 +289,7 @@ fi
 # ── Deploy ──────────────────────────────────────────────────────────────
 header "Deploying"
 
-DEPLOY_OUTPUT=$(npx wrangler deploy 2>&1)
+DEPLOY_OUTPUT=$(wrangler deploy 2>&1)
 DEPLOY_EXIT=$?
 WORKER_URL=$(echo "$DEPLOY_OUTPUT" | grep -o 'https://[^ ]*\.workers\.dev' | head -1)
 
@@ -314,12 +317,12 @@ if [ $DEPLOY_EXIT -ne 0 ] && [ -n "$CUSTOM_DOMAIN" ]; then
       fi
       CUSTOM_DOMAIN=""
       info "Retrying deploy without custom domain..."
-      DEPLOY_OUTPUT=$(npx wrangler deploy 2>&1)
+      DEPLOY_OUTPUT=$(wrangler deploy 2>&1)
       WORKER_URL=$(echo "$DEPLOY_OUTPUT" | grep -o 'https://[^ ]*\.workers\.dev' | head -1)
     else
       echo ""
       echo "$DEPLOY_OUTPUT"
-      fail "Deploy failed. Fix the domain issue and run 'npx wrangler deploy' manually."
+      fail "Deploy failed. Fix the domain issue and run 'wrangler deploy' manually."
     fi
   else
     echo ""
