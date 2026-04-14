@@ -12,7 +12,7 @@ crons = ["*/15 * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "email-mcp"
-database_id = ""
+database_id = "d41be22e-8984-442c-aec8-c10b21ed7cf3"
 
 [[r2_buckets]]
 binding = "R2"
