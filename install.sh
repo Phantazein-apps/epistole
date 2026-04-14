@@ -77,20 +77,44 @@ if ! wrangler d1 list &>/dev/null 2>&1; then
 fi
 ok "Cloudflare authenticated"
 
-# ── Clone repo ──────────────────────────────────────────────────────────
+# ── Clean up old installations ──────────────────────────────────────────
 header "Setting up project"
 
+# Remove old MCPB bundle (v1/v2)
+OLD_MCPB="$HOME/Library/Application Support/Claude/Claude Extensions/local.mcpb.phantazein.epistole"
+if [ -d "$OLD_MCPB" ]; then
+  info "Removing old Epistole MCPB bundle..."
+  rm -rf "$OLD_MCPB"
+  ok "Old bundle removed"
+fi
+
+# Remove old bearer-token config from Claude Desktop
+CONFIG_FILE="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+if [ -f "$CONFIG_FILE" ] && grep -q '"email"' "$CONFIG_FILE" 2>/dev/null; then
+  if grep -q 'Authorization.*Bearer' "$CONFIG_FILE" 2>/dev/null; then
+    info "Removing old bearer-token email config from Claude Desktop..."
+    node -e "
+      const fs = require('fs');
+      const cfg = JSON.parse(fs.readFileSync('$CONFIG_FILE', 'utf8'));
+      if (cfg.mcpServers && cfg.mcpServers.email) {
+        delete cfg.mcpServers.email;
+        fs.writeFileSync('$CONFIG_FILE', JSON.stringify(cfg, null, 2) + '\n');
+      }
+    " 2>/dev/null && ok "Old config entry removed" || true
+  fi
+fi
+
+# Fresh clone (remove stale state from previous installs)
 INSTALL_DIR="$HOME/.epistole-server"
 
 if [ -d "$INSTALL_DIR" ]; then
-  info "Updating existing installation..."
-  cd "$INSTALL_DIR"
-  git pull --quiet
-else
-  info "Cloning repository..."
-  git clone --quiet https://github.com/Phantazein-apps/epistole.git "$INSTALL_DIR"
-  cd "$INSTALL_DIR"
+  info "Removing previous installation..."
+  rm -rf "$INSTALL_DIR"
 fi
+
+info "Cloning repository..."
+git clone --quiet https://github.com/Phantazein-apps/epistole.git "$INSTALL_DIR"
+cd "$INSTALL_DIR"
 
 info "Installing dependencies..."
 npm install --silent 2>/dev/null
