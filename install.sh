@@ -162,6 +162,66 @@ EMAIL_PASS="$REPLY"
 SMTP_USER="$IMAP_USER"
 SMTP_PASS="$EMAIL_PASS"
 
+# ── Validate credentials ───────────────────────────────────────────────
+header "Validating credentials"
+
+info "Connecting to ${IMAP_HOST}:${IMAP_PORT}..."
+
+# Use openssl to test IMAP login (available on macOS and most Linux)
+IMAP_TEST=$(expect <<EXPECTEOF 2>&1 || true
+set timeout 10
+spawn openssl s_client -connect ${IMAP_HOST}:${IMAP_PORT} -quiet
+expect {
+  "* OK" {}
+  timeout { puts "TIMEOUT"; exit 1 }
+  eof { puts "CONNECTION_FAILED"; exit 1 }
+}
+send "A1 LOGIN \"${IMAP_USER}\" \"${EMAIL_PASS}\"\r"
+expect {
+  "A1 OK" { puts "LOGIN_OK"; }
+  "A1 NO" { puts "LOGIN_FAILED"; }
+  "A1 BAD" { puts "LOGIN_FAILED"; }
+  timeout { puts "LOGIN_TIMEOUT"; }
+}
+send "A2 LOGOUT\r"
+expect eof
+EXPECTEOF
+)
+
+if echo "$IMAP_TEST" | grep -q "LOGIN_OK"; then
+  ok "IMAP login successful"
+elif echo "$IMAP_TEST" | grep -q "LOGIN_FAILED"; then
+  echo ""
+  fail "IMAP login failed — wrong username or password.\n  Check your credentials and try again.\n  ${DIM}If using Gmail/Fastmail/Yahoo/iCloud, make sure you're using an app-specific password.${NC}"
+elif echo "$IMAP_TEST" | grep -q "CONNECTION_FAILED\|TIMEOUT"; then
+  warn "Could not connect to ${IMAP_HOST}:${IMAP_PORT}"
+  echo -e "  ${DIM}This might be a firewall issue or wrong hostname/port.${NC}"
+  ask "Continue anyway? [y/N]"
+  read CONTINUE_ANYWAY
+  if [[ ! "$CONTINUE_ANYWAY" =~ ^[Yy] ]]; then
+    fail "Aborted. Fix your IMAP settings and try again."
+  fi
+else
+  # expect might not be available — fall back to openssl-only check
+  OPENSSL_TEST=$(echo -e "A1 LOGIN \"${IMAP_USER}\" \"${EMAIL_PASS}\"\nA2 LOGOUT" | \
+    openssl s_client -connect "${IMAP_HOST}:${IMAP_PORT}" -quiet 2>/dev/null | \
+    head -20)
+
+  if echo "$OPENSSL_TEST" | grep -q "A1 OK"; then
+    ok "IMAP login successful"
+  elif echo "$OPENSSL_TEST" | grep -q "A1 NO\|A1 BAD"; then
+    echo ""
+    fail "IMAP login failed — wrong username or password.\n  Check your credentials and try again."
+  else
+    warn "Could not verify IMAP credentials (openssl test inconclusive)"
+    ask "Continue anyway? [y/N]"
+    read CONTINUE_ANYWAY2
+    if [[ ! "$CONTINUE_ANYWAY2" =~ ^[Yy] ]]; then
+      fail "Aborted."
+    fi
+  fi
+fi
+
 # ── Generate MCP token ──────────────────────────────────────────────────
 MCP_TOKEN=$(openssl rand -hex 32)
 ok "Generated MCP auth token"
