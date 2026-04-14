@@ -220,11 +220,33 @@ fi
 header "Creating Cloudflare resources"
 
 # Helper: extract a UUID from wrangler output (handles various formats)
+# Helper: get Cloudflare API token from wrangler config
+get_cf_token() {
+  local cfg="${HOME}/Library/Preferences/.wrangler/config/default.toml"
+  if [ ! -f "$cfg" ]; then
+    cfg="${HOME}/.wrangler/config/default.toml"
+  fi
+  grep -o 'oauth_token = "[^"]*"' "$cfg" 2>/dev/null | cut -d'"' -f2
+}
+
+# Helper: get Cloudflare account ID
+get_cf_account_id() {
+  local token=$(get_cf_token)
+  if [ -n "$token" ]; then
+    curl -s -H "Authorization: Bearer $token" "https://api.cloudflare.com/client/v4/accounts?per_page=1" 2>/dev/null | \
+      grep -oE '"id":"[^"]*"' | head -1 | cut -d'"' -f4
+  fi
+}
+
+CF_TOKEN=$(get_cf_token)
+CF_ACCOUNT_ID=$(get_cf_account_id)
+
+if [ -z "$CF_TOKEN" ] || [ -z "$CF_ACCOUNT_ID" ]; then
+  fail "Could not read Cloudflare credentials. Run 'wrangler login' and try again."
+fi
+
 extract_uuid() {
   echo "$1" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1
-}
-extract_hex32() {
-  echo "$1" | grep -oE '[0-9a-f]{32}' | head -1
 }
 
 # D1
@@ -232,10 +254,27 @@ info "Creating D1 database..."
 D1_OUTPUT=$(wrangler d1 create email-mcp 2>&1) || true
 D1_ID=$(extract_uuid "$D1_OUTPUT")
 if [ -z "$D1_ID" ]; then
-  # Already exists — look it up
-  info "D1 may already exist, looking up ID..."
-  D1_LIST=$(wrangler d1 list 2>&1)
-  D1_ID=$(echo "$D1_LIST" | grep -B2 -A2 "email-mcp" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+  # Already exists — look it up via API
+  info "D1 may already exist, looking up via API..."
+  D1_API=$(curl -s -H "Authorization: Bearer $CF_TOKEN" \
+    "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/d1/database" 2>/dev/null)
+  D1_ID=$(echo "$D1_API" | grep -o '"uuid":"[^"]*"' | while read -r line; do
+    uuid=$(echo "$line" | cut -d'"' -f4)
+    if echo "$D1_API" | grep -q "\"name\":\"email-mcp\""; then
+      echo "$uuid"
+      break
+    fi
+  done)
+  # More robust: use node to parse JSON
+  if [ -z "$D1_ID" ]; then
+    D1_ID=$(echo "$D1_API" | node -e "
+      let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{
+        try { const r=JSON.parse(d).result||[];
+          const db=r.find(x=>x.name==='email-mcp');
+          if(db) console.log(db.uuid);
+        } catch{}
+      });" 2>/dev/null)
+  fi
 fi
 if [ -n "$D1_ID" ]; then
   if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -266,12 +305,19 @@ ok "Vectorize index ready"
 # KV (for OAuth state)
 info "Creating KV namespace for OAuth..."
 KV_OUTPUT=$(wrangler kv namespace create email-mcp-oauth 2>&1) || true
-KV_ID=$(extract_hex32 "$KV_OUTPUT")
+KV_ID=$(echo "$KV_OUTPUT" | grep -oE '[0-9a-f]{32}' | head -1)
 if [ -z "$KV_ID" ]; then
-  # Already exists — look it up
-  info "KV may already exist, looking up ID..."
-  KV_LIST=$(wrangler kv namespace list 2>&1)
-  KV_ID=$(echo "$KV_LIST" | grep -B2 -A2 "email-mcp-oauth" | grep -oE '[0-9a-f]{32}' | head -1)
+  # Already exists — look it up via API
+  info "KV may already exist, looking up via API..."
+  KV_ID=$(curl -s -H "Authorization: Bearer $CF_TOKEN" \
+    "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces" 2>/dev/null | \
+    node -e "
+      let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{
+        try { const r=JSON.parse(d).result||[];
+          const ns=r.find(x=>x.title==='email-mcp-oauth');
+          if(ns) console.log(ns.id);
+        } catch{}
+      });" 2>/dev/null)
 fi
 if [ -n "$KV_ID" ]; then
   # Only replace the KV id line (not the D1 database_id line)
