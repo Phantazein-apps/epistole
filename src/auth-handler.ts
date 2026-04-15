@@ -126,7 +126,7 @@ app.post("/authorize/verify", async (c) => {
   // after returning HTML and the background sync gets aborted.
   c.executionCtx.waitUntil((async () => {
     try {
-      const results = await runIncrementalSync(c.env);
+      const results = await runIncrementalSync(c.env, { jobId });
       const totalNew = results.reduce((s, r) => s + r.newMessages, 0);
       const errors = results.flatMap((r) => r.errors);
       await c.env.DB.prepare(
@@ -230,6 +230,82 @@ app.get("/sync-progress", async (c) => {
 // ── Health check ───────────────────────────────────────────────────────
 
 app.get("/health", (c) => c.text("ok"));
+
+// ── Debug: sync state ──────────────────────────────────────────────────
+
+app.get("/debug/sync", async (c) => {
+  const debugKey = c.req.query("key");
+  if (debugKey !== "epistole-debug") {
+    return c.json({ error: "Unauthorized. Add ?key=epistole-debug" }, 401);
+  }
+
+  const folderStates = await c.env.DB.prepare(
+    "SELECT * FROM folder_state ORDER BY folder"
+  ).all();
+
+  const emailCount = await c.env.DB.prepare(
+    "SELECT folder, COUNT(*) as cnt FROM emails GROUP BY folder"
+  ).all();
+
+  const recentJobs = await c.env.DB.prepare(
+    "SELECT * FROM sync_jobs ORDER BY started_at DESC LIMIT 10"
+  ).all();
+
+  const total = await c.env.DB.prepare("SELECT COUNT(*) as cnt FROM emails")
+    .first<{ cnt: number }>();
+
+  return c.json({
+    total_indexed: total?.cnt || 0,
+    emails_by_folder: emailCount.results,
+    folder_state: folderStates.results,
+    recent_jobs: recentJobs.results,
+  });
+});
+
+// ── Debug: trigger sync directly (bypasses MCP) ───────────────────────
+
+app.get("/debug/sync-run", async (c) => {
+  const debugKey = c.req.query("key");
+  if (debugKey !== "epistole-debug") {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const { runIncrementalSync } = await import("./sync/incremental.js");
+  const jobId = crypto.randomUUID().substring(0, 8);
+
+  await c.env.DB.prepare(
+    "INSERT INTO sync_jobs (job_id, status, started_at, folders, full_sync) VALUES (?, 'running', ?, 'all', 0)"
+  )
+    .bind(jobId, new Date().toISOString())
+    .run();
+
+  c.executionCtx.waitUntil((async () => {
+    try {
+      const results = await runIncrementalSync(c.env, { jobId });
+      const totalNew = results.reduce((s, r) => s + r.newMessages, 0);
+      const errors = results.flatMap((r) => r.errors);
+      await c.env.DB.prepare(
+        "UPDATE sync_jobs SET status = 'completed', finished_at = ?, error = ? WHERE job_id = ?"
+      )
+        .bind(
+          new Date().toISOString(),
+          errors.length > 0 ? errors.join("; ").slice(0, 500) : null,
+          jobId
+        )
+        .run();
+      console.log(`Debug sync ${jobId} complete: ${totalNew} new messages`);
+    } catch (err: any) {
+      await c.env.DB.prepare(
+        "UPDATE sync_jobs SET status = 'failed', finished_at = ?, error = ? WHERE job_id = ?"
+      )
+        .bind(new Date().toISOString(), err.message?.slice(0, 500) || "unknown", jobId)
+        .run();
+      console.error(`Debug sync ${jobId} failed:`, err.message);
+    }
+  })());
+
+  return c.json({ started: true, jobId, message: "Sync running in background. Poll /debug/sync to see progress." });
+});
 
 // ── Debug: test raw TLS socket to IMAP server ─────────────────────────
 

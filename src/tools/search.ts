@@ -202,7 +202,7 @@ After calling this, tell the user:
       // Durable Object keeps the promise alive past the tool response
       const runInBackground = (async () => {
         try {
-          const results = await runIncrementalSync(env, { folders: folderList, full });
+          const results = await runIncrementalSync(env, { folders: folderList, full, jobId });
           const totalNew = results.reduce((s, r) => s + r.newMessages, 0);
           const allErrors = results.flatMap((r) => r.errors);
 
@@ -263,17 +263,35 @@ After calling this, tell the user:
     "Check the current state of the email sync process. Returns sync timing, per-folder stats, and recent errors.",
     {},
     async () => {
-      // Folder stats
+      // Treat any "running" job older than 60s as stale (the Worker probably
+      // hit its CPU limit and died without updating status).
+      const staleCutoff = new Date(Date.now() - 60_000).toISOString();
+      await env.DB.prepare(
+        "UPDATE sync_jobs SET status = 'timed_out', finished_at = ? WHERE status = 'running' AND started_at < ?"
+      )
+        .bind(new Date().toISOString(), staleCutoff)
+        .run()
+        .catch(() => {});
+
+      // Emails grouped by folder (authoritative count from actual data)
+      const emailCounts = await env.DB.prepare(
+        "SELECT folder, COUNT(*) as cnt FROM emails GROUP BY folder"
+      ).all<{ folder: string; cnt: number }>();
+
+      // Folder state (sync checkpoint info)
       const folderRows = await env.DB.prepare(
         "SELECT folder, last_uid, uidvalidity, last_sync_at, message_count FROM folder_state"
       ).all();
 
       const folders: Record<string, any> = {};
+      for (const c of emailCounts.results) {
+        folders[c.folder] = { indexed: c.cnt };
+      }
       for (const row of folderRows.results) {
-        folders[row.folder as string] = {
-          indexed: row.message_count,
+        const f = row.folder as string;
+        folders[f] = {
+          indexed: folders[f]?.indexed ?? 0,
           last_uid: row.last_uid,
-          uidvalidity: row.uidvalidity,
           last_sync_at: row.last_sync_at,
         };
       }
@@ -281,13 +299,13 @@ After calling this, tell the user:
       // Total indexed
       const countRow = await env.DB.prepare("SELECT COUNT(*) as cnt FROM emails").first<{ cnt: number }>();
 
-      // Recent jobs
+      // Recent jobs (after stale cleanup above)
       const jobs = await env.DB.prepare(
         "SELECT * FROM sync_jobs ORDER BY started_at DESC LIMIT 5"
       ).all();
 
       const running = jobs.results.find((j) => j.status === "running");
-      const lastComplete = jobs.results.find((j) => j.status === "completed");
+      const lastComplete = jobs.results.find((j) => j.status === "completed" || j.status === "timed_out");
 
       return {
         content: [

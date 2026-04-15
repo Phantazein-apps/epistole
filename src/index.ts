@@ -77,7 +77,7 @@ export default {
           .run();
 
         try {
-          const results = await runIncrementalSync(env);
+          const results = await runIncrementalSync(env, { jobId });
           const totalNew = results.reduce((s, r) => s + r.newMessages, 0);
           const errors = results.flatMap((r) => r.errors);
 

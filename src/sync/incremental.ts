@@ -38,7 +38,7 @@ function addrStr(addr: any): string {
 
 export async function runIncrementalSync(
   env: Env,
-  options: { folders?: string[]; full?: boolean } = {}
+  options: { folders?: string[]; full?: boolean; jobId?: string } = {}
 ): Promise<SyncResult[]> {
   const cfg: ImapConfig = {
     host: env.IMAP_HOST,
@@ -73,8 +73,7 @@ export async function runIncrementalSync(
 
   for (const folder of folders) {
     if (budget <= 0) {
-      // Not enough budget for another folder this invocation;
-      // cron will pick up the rest next time
+      // Not enough budget for another folder this invocation
       results.push({
         folder,
         newMessages: 0,
@@ -84,12 +83,34 @@ export async function runIncrementalSync(
       continue;
     }
 
+    // Update job progress BEFORE each folder so we can see where we are
+    // even if the worker gets killed mid-sync.
+    if (options.jobId) {
+      await env.DB.prepare(
+        "UPDATE sync_jobs SET error = ? WHERE job_id = ?"
+      )
+        .bind(`processing ${folder}...`, options.jobId)
+        .run()
+        .catch(() => {});
+    }
+
     try {
       const result = await withImap(cfg, (client) =>
-        syncFolder(env, client, folder, options.full || false, budget)
+        syncFolder(env, client, folder, options.full || false, budget, options.jobId)
       );
       budget -= result.newMessages;
       results.push(result);
+
+      // Update progress after each folder
+      if (options.jobId) {
+        const totalSoFar = results.reduce((s, r) => s + r.newMessages, 0);
+        await env.DB.prepare(
+          "UPDATE sync_jobs SET error = ? WHERE job_id = ?"
+        )
+          .bind(`progress: ${totalSoFar} indexed across ${results.length} folders`, options.jobId)
+          .run()
+          .catch(() => {});
+      }
     } catch (err: any) {
       console.error(`Sync failed for ${folder}:`, err.message);
       results.push({
@@ -109,9 +130,18 @@ async function syncFolder(
   client: ImapClient,
   folder: string,
   full: boolean,
-  budget: number
+  budget: number,
+  jobId?: string
 ): Promise<SyncResult> {
   const errors: string[] = [];
+
+  const updateStatus = async (msg: string) => {
+    if (!jobId) return;
+    await env.DB.prepare("UPDATE sync_jobs SET error = ? WHERE job_id = ?")
+      .bind(msg.slice(0, 500), jobId).run().catch(() => {});
+  };
+
+  await updateStatus(`${folder}: fetching state...`);
 
   const stateRow = await env.DB.prepare(
     "SELECT last_uid, uidvalidity FROM folder_state WHERE folder = ?"
@@ -122,6 +152,7 @@ async function syncFolder(
   let lastUid = stateRow?.last_uid || 0;
   const storedValidity = stateRow?.uidvalidity || 0;
 
+  await updateStatus(`${folder}: selecting...`);
   const { exists, uidvalidity } = await client.select(folder);
 
   if (storedValidity > 0 && uidvalidity !== storedValidity) {
@@ -130,10 +161,15 @@ async function syncFolder(
     lastUid = 0;
   }
 
-  // Get all UIDs currently in the folder via IMAP
+  await updateStatus(`${folder}: persisting state (exists=${exists})...`);
+  // Write folder_state row immediately on first encounter — ensures we
+  // have a record even if the Worker dies before syncFolder completes.
+  await updateFolderState(env, folder, lastUid, uidvalidity, exists);
+
+  await updateStatus(`${folder}: listing UIDs...`);
   const allUids = await client.uidSearch("ALL");
 
-  // Get UIDs we've already indexed for this folder from D1
+  await updateStatus(`${folder}: found ${allUids.length} uids; checking already indexed...`);
   let indexedSet = new Set<number>();
   if (!full) {
     const rows = await env.DB.prepare(
@@ -143,11 +179,9 @@ async function syncFolder(
       .all<{ uid: number }>();
     indexedSet = new Set(rows.results.map((r) => r.uid));
   } else {
-    // Full resync — wipe existing data for this folder
     await env.DB.prepare("DELETE FROM emails WHERE folder = ?").bind(folder).run();
   }
 
-  // Compute unindexed UIDs, newest first
   let newUids = allUids.filter((u) => !indexedSet.has(u)).sort((a, b) => b - a);
 
   if (newUids.length === 0) {
@@ -163,12 +197,18 @@ async function syncFolder(
   }
 
   let maxUid = lastUid;
+  let processed = 0;
   const embedBatch: { id: string; text: string; metadata: Record<string, any> }[] = [];
 
   for (const uid of newUids) {
     try {
-      const raw = await client.uidFetchBody(uid);
+      await updateStatus(`${folder}: fetching UID ${uid} (${processed + 1}/${newUids.length})`);
+      // Light-weight fetch: headers + first 20KB of body only.
+      // Full body available on demand via get_message tool.
+      const raw = await client.uidFetchIndexable(uid, 20_000);
+      await updateStatus(`${folder}: parsing UID ${uid} (${raw.length} bytes)`);
       const parsed = await simpleParser(Buffer.from(raw));
+      processed++;
 
       const subj = parsed.subject || "";
       const from = addrStr(parsed.from);
@@ -178,11 +218,16 @@ async function syncFolder(
       const replyTo = parsed.inReplyTo || "";
       const date = parsed.date?.toISOString() || "";
 
-      const atts = parsed.attachments || [];
-      const attFilenames = atts
+      // Note: we only fetched headers + first 20KB of body, so attachments
+      // from simpleParser will be incomplete or missing. We'll flag messages
+      // as having attachments based on Content-Type header later.
+      // For now, don't try to save attachment content during sync — the
+      // get_attachments tool can fetch them on demand.
+      const hasAtts = !!(parsed as any).headers?.get?.("content-type")?.toString?.()?.includes("multipart/mixed") ||
+        !!parsed.attachments?.length;
+      const attFilenames: string[] = (parsed.attachments || [])
         .filter((a: any) => a.filename)
         .map((a: any) => a.filename as string);
-      const hasAtts = attFilenames.length > 0;
       const snippet = body.substring(0, 300);
       const emailId = `${folder}:${uid}`;
 
@@ -199,18 +244,8 @@ async function syncFolder(
         )
         .run();
 
-      // Save attachments to R2
-      if (hasAtts) {
-        for (const att of atts) {
-          if (!att.filename || !att.content) continue;
-          const key = `attachments/${folder}/${uid}/${att.filename}`;
-          try {
-            await env.R2.put(key, att.content);
-          } catch (r2err: any) {
-            console.warn(`R2 put failed for ${key}:`, r2err.message);
-          }
-        }
-      }
+      // Attachments are NOT saved during sync (we only fetch headers + 20KB body
+      // to stay under CPU budget).  get_attachments tool fetches on demand.
 
       const embedText = [subj, from, body]
         .filter(Boolean)
@@ -232,6 +267,9 @@ async function syncFolder(
 
       if (embedBatch.length >= EMBED_BATCH) {
         await flushEmbeddings(env, embedBatch.splice(0));
+        // Update folder_state after each embedding flush — ensures
+        // progress is persisted even if the Worker dies mid-sync.
+        await updateFolderState(env, folder, maxUid, uidvalidity, exists);
       }
     } catch (err: any) {
       errors.push(`UID ${uid}: ${err.message}`);

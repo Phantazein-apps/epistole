@@ -215,7 +215,7 @@ export class ImapClient {
     return results;
   }
 
-  /** Fetch full raw RFC 822 body for a single UID. */
+  /** Fetch full raw RFC 822 body for a single UID.  Use for get_message tool. */
   async uidFetchBody(uid: number): Promise<Uint8Array> {
     const resp = await this.command(`UID FETCH ${uid} (BODY.PEEK[])`);
     if (!resp.ok) throw new Error(`UID FETCH body ${uid} failed: ${resp.status}`);
@@ -232,6 +232,46 @@ export class ImapClient {
       }
     }
     throw new Error(`No body data returned for UID ${uid}`);
+  }
+
+  /**
+   * Fetch just headers + first N bytes of text body for a single UID.
+   * Used for indexing: we don't need attachments or huge bodies to
+   * generate embeddings, and this keeps per-message CPU low.
+   *
+   * Returns concatenated header + text body bytes.  Good enough to
+   * pass through mailparser for clean text extraction.
+   */
+  async uidFetchIndexable(uid: number, maxBodyBytes = 20000): Promise<Uint8Array> {
+    // HEADER: always small; TEXT<0.N>: first N bytes of body
+    const resp = await this.command(
+      `UID FETCH ${uid} (BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.${maxBodyBytes}>)`
+    );
+    if (!resp.ok) throw new Error(`UID FETCH indexable ${uid} failed: ${resp.status}`);
+
+    const literals: Uint8Array[] = [];
+    for (const item of resp.items) {
+      if (item.type === "literal") literals.push(item.data);
+    }
+    if (literals.length === 0) throw new Error(`No body data returned for UID ${uid}`);
+
+    // Concatenate header + text body with blank line between (RFC 822)
+    const separator = new Uint8Array([0x0d, 0x0a, 0x0d, 0x0a]);
+    let total = 0;
+    for (const l of literals) total += l.length;
+    total += separator.length * Math.max(0, literals.length - 1);
+
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (let i = 0; i < literals.length; i++) {
+      out.set(literals[i], offset);
+      offset += literals[i].length;
+      if (i < literals.length - 1) {
+        out.set(separator, offset);
+        offset += separator.length;
+      }
+    }
+    return out;
   }
 
   async uidStore(uid: number, flag: string, add: boolean): Promise<void> {
