@@ -9,9 +9,12 @@ import { simpleParser } from "mailparser";
 import { withImap, type ImapConfig, type ImapFlow } from "../imap/client.js";
 import type { Env } from "../types.js";
 
-const BATCH_SIZE = 50;
-const EMBED_BATCH = 100;
+const BATCH_SIZE = 25;
+const EMBED_BATCH = 50;
 const MAX_BODY_CHARS = 2000; // bge-base-en-v1.5 has 512 token limit
+// Cap each sync invocation to avoid Worker CPU/wall-time limits.
+// If there are more new messages, the next cron run picks them up.
+const MAX_MESSAGES_PER_SYNC = 100;
 
 interface SyncResult {
   folder: string;
@@ -101,12 +104,20 @@ async function syncFolder(
 
       // Search for new UIDs
       const query: any = lastUid > 0 ? { uid: `${lastUid + 1}:*` } : { all: true };
-      const uids = await client.search(query, { uid: true });
-      const newUids = (uids || []).filter((u: number) => u > lastUid);
+      const allNewUids = await client.search(query, { uid: true });
+      let newUids = (allNewUids || []).filter((u: number) => u > lastUid);
 
       if (newUids.length === 0) {
         await updateFolderState(env, folder, lastUid, uidvalidity, exists);
         return { folder, newMessages: 0, lastUid, errors };
+      }
+
+      // Cap to MAX_MESSAGES_PER_SYNC oldest unsynced messages.
+      // The next cron run will pick up the rest.
+      const totalPending = newUids.length;
+      if (newUids.length > MAX_MESSAGES_PER_SYNC) {
+        newUids = newUids.sort((a: number, b: number) => a - b).slice(0, MAX_MESSAGES_PER_SYNC);
+        console.log(`${folder}: capping batch to ${MAX_MESSAGES_PER_SYNC} of ${totalPending} pending messages`);
       }
 
       let maxUid = lastUid;

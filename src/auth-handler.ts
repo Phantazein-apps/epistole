@@ -121,7 +121,10 @@ app.post("/authorize/verify", async (c) => {
     .bind(jobId, new Date().toISOString())
     .run();
 
-  (async () => {
+  // Extend request lifetime via ctx.waitUntil so the sync promise survives
+  // beyond the response. Without this, Workers kills the request immediately
+  // after returning HTML and the background sync gets aborted.
+  c.executionCtx.waitUntil((async () => {
     try {
       const results = await runIncrementalSync(c.env);
       const totalNew = results.reduce((s, r) => s + r.newMessages, 0);
@@ -142,8 +145,9 @@ app.post("/authorize/verify", async (c) => {
       )
         .bind(new Date().toISOString(), err.message?.slice(0, 500) || "unknown", jobId)
         .run();
+      console.error(`Auto-sync ${jobId} failed:`, err.message);
     }
-  })().catch(() => {});
+  })());
 
   // Store the verified OAuth request + email so /complete can finish it
   await c.env.OAUTH_KV.put(
