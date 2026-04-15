@@ -102,28 +102,18 @@ app.post("/authorize/verify", async (c) => {
     return c.html(codePage(stateId, email, "Incorrect code. Check your email and try again."));
   }
 
-  // Code is correct — clean up
+  // Code is correct — clean up the verification artifacts
   await c.env.OAUTH_KV.delete(`oauth:code:${stateId}`);
   await c.env.OAUTH_KV.delete(`oauth:state:${stateId}`);
 
   const oauthReqInfo: AuthRequest = JSON.parse(stored);
 
-  // Complete the OAuth flow — get the redirect URL but don't redirect yet
-  const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
-    request: oauthReqInfo,
-    userId: email,
-    metadata: {
-      label: c.env.FULL_NAME || email,
-    },
-    scope: oauthReqInfo.scope,
-    props: {
-      email,
-      name: c.env.FULL_NAME || "",
-    },
-  });
+  // DON'T call completeAuthorization yet — the OAuth code expires in ~60s.
+  // We'll generate it when the user clicks "Return to Claude".
+  // Store the verified OAuth request so we can complete it later.
+  const sessionId = crypto.randomUUID();
 
-  // Kick off a background sync so it's already running by the time the user
-  // gets back to Claude.  Fire-and-forget — no await.
+  // Kick off a background sync immediately
   const jobId = crypto.randomUUID().substring(0, 8);
   await c.env.DB.prepare(
     "INSERT INTO sync_jobs (job_id, status, started_at, folders, full_sync) VALUES (?, 'running', ?, 'all', 0)"
@@ -131,7 +121,6 @@ app.post("/authorize/verify", async (c) => {
     .bind(jobId, new Date().toISOString())
     .run();
 
-  // Use a non-awaited promise so the response returns immediately
   (async () => {
     try {
       const results = await runIncrementalSync(c.env);
@@ -156,16 +145,45 @@ app.post("/authorize/verify", async (c) => {
     }
   })().catch(() => {});
 
-  // Store a short-lived session so the success page can poll for progress
-  // without being authenticated yet
-  const sessionId = crypto.randomUUID();
+  // Store the verified OAuth request + email so /complete can finish it
   await c.env.OAUTH_KV.put(
     `session:${sessionId}`,
-    JSON.stringify({ jobId, redirectTo, startedAt: Date.now() }),
+    JSON.stringify({ jobId, oauthReqInfo, email, startedAt: Date.now() }),
     { expirationTtl: SESSION_TTL }
   );
 
-  return c.html(successPage(sessionId, redirectTo));
+  return c.html(successPage(sessionId));
+});
+
+// ── Step 4: Complete OAuth (called when user clicks "Return to Claude") ─
+
+app.get("/authorize/complete", async (c) => {
+  const sessionId = c.req.query("session");
+  if (!sessionId) return c.text("Missing session", 400);
+
+  const sessionData = await c.env.OAUTH_KV.get(`session:${sessionId}`);
+  if (!sessionData) return c.text("Session expired. Please start over.", 400);
+
+  const { oauthReqInfo, email } = JSON.parse(sessionData);
+
+  // Generate a fresh OAuth code and redirect immediately
+  const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
+    request: oauthReqInfo,
+    userId: email,
+    metadata: {
+      label: c.env.FULL_NAME || email,
+    },
+    scope: oauthReqInfo.scope,
+    props: {
+      email,
+      name: c.env.FULL_NAME || "",
+    },
+  });
+
+  // Don't delete the session yet — the progress page may still be polling.
+  // It expires via TTL.
+
+  return c.redirect(redirectTo);
 });
 
 // ── Sync progress endpoint (called by JS on success page) ──────────────
@@ -397,9 +415,7 @@ function codePage(stateId: string, email: string, error: string | null): string 
 </html>`;
 }
 
-function successPage(sessionId: string, redirectTo: string): string {
-  // Encode redirect URL safely for use in HTML attributes / JS
-  const safeRedirect = redirectTo.replace(/"/g, "&quot;").replace(/'/g, "\\'");
+function successPage(sessionId: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -477,7 +493,7 @@ function successPage(sessionId: string, redirectTo: string): string {
     </div>
 
     <button onclick="returnToClaude()">Return to Claude</button>
-    <button class="secondary" onclick="window.close()">Close this tab</button>
+    <button class="secondary" onclick="window.close()">Close this tab (sync continues)</button>
 
     <p class="note">
       The sync continues even after you close this tab — it runs on Cloudflare.
@@ -487,10 +503,12 @@ function successPage(sessionId: string, redirectTo: string): string {
 
   <script>
     const SESSION_ID = ${JSON.stringify(sessionId)};
-    const REDIRECT_URL = ${JSON.stringify(redirectTo)};
 
     function returnToClaude() {
-      window.location.href = REDIRECT_URL;
+      // Hit the /authorize/complete endpoint which generates a fresh OAuth
+      // code (avoids 60-second expiry while user looks at this page) and
+      // redirects back to the OAuth client.
+      window.location.href = '/authorize/complete?session=' + encodeURIComponent(SESSION_ID);
     }
 
     async function pollProgress() {
