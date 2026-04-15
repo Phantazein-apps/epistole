@@ -10,9 +10,13 @@ import { simpleParser } from "mailparser";
 import { withImap, ImapClient, type ImapConfig } from "../imap/client.js";
 import type { Env } from "../types.js";
 
-const EMBED_BATCH = 50;
+const EMBED_BATCH = 20;
 const MAX_BODY_CHARS = 2000;
-const MAX_MESSAGES_PER_SYNC = 60; // fits well under Worker 30s CPU budget
+// Total cap across ALL folders per invocation. Subsequent cron runs
+// (every 15 min) catch up. Set conservatively to fit Worker 30s CPU.
+const MAX_MESSAGES_PER_INVOCATION = 40;
+// Prioritize these folders — INBOX first so user sees their main mail ASAP.
+const FOLDER_PRIORITY = ["INBOX", "Sent", "Archive"];
 
 interface SyncResult {
   folder: string;
@@ -45,7 +49,7 @@ export async function runIncrementalSync(
 
   const results: SyncResult[] = [];
 
-  // If folders not specified, list them ONCE with a fresh connection
+  // If folders not specified, list them with a fresh connection
   let folders = options.folders;
   if (!folders || folders.length === 0) {
     folders = await withImap(cfg, async (c) => {
@@ -54,11 +58,37 @@ export async function runIncrementalSync(
     });
   }
 
+  // Sort folders: priority folders first, then alphabetically
+  folders = folders.slice().sort((a, b) => {
+    const aPri = FOLDER_PRIORITY.indexOf(a);
+    const bPri = FOLDER_PRIORITY.indexOf(b);
+    if (aPri !== -1 && bPri !== -1) return aPri - bPri;
+    if (aPri !== -1) return -1;
+    if (bPri !== -1) return 1;
+    return a.localeCompare(b);
+  });
+
+  // Track remaining budget across folders so we don't blow the CPU limit
+  let budget = MAX_MESSAGES_PER_INVOCATION;
+
   for (const folder of folders) {
+    if (budget <= 0) {
+      // Not enough budget for another folder this invocation;
+      // cron will pick up the rest next time
+      results.push({
+        folder,
+        newMessages: 0,
+        lastUid: 0,
+        errors: ["deferred: budget exhausted, will resume next cron run"],
+      });
+      continue;
+    }
+
     try {
       const result = await withImap(cfg, (client) =>
-        syncFolder(env, client, folder, options.full || false)
+        syncFolder(env, client, folder, options.full || false, budget)
       );
+      budget -= result.newMessages;
       results.push(result);
     } catch (err: any) {
       console.error(`Sync failed for ${folder}:`, err.message);
@@ -78,7 +108,8 @@ async function syncFolder(
   env: Env,
   client: ImapClient,
   folder: string,
-  full: boolean
+  full: boolean,
+  budget: number
 ): Promise<SyncResult> {
   const errors: string[] = [];
 
@@ -99,22 +130,36 @@ async function syncFolder(
     lastUid = 0;
   }
 
-  if (full) lastUid = 0;
+  // Get all UIDs currently in the folder via IMAP
+  const allUids = await client.uidSearch("ALL");
 
-  // Search for new UIDs
-  const criteria = lastUid > 0 ? `UID ${lastUid + 1}:*` : "ALL";
-  const allNew = await client.uidSearch(criteria);
-  let newUids = allNew.filter((u) => u > lastUid).sort((a, b) => a - b);
+  // Get UIDs we've already indexed for this folder from D1
+  let indexedSet = new Set<number>();
+  if (!full) {
+    const rows = await env.DB.prepare(
+      "SELECT uid FROM emails WHERE folder = ?"
+    )
+      .bind(folder)
+      .all<{ uid: number }>();
+    indexedSet = new Set(rows.results.map((r) => r.uid));
+  } else {
+    // Full resync — wipe existing data for this folder
+    await env.DB.prepare("DELETE FROM emails WHERE folder = ?").bind(folder).run();
+  }
+
+  // Compute unindexed UIDs, newest first
+  let newUids = allUids.filter((u) => !indexedSet.has(u)).sort((a, b) => b - a);
 
   if (newUids.length === 0) {
-    await updateFolderState(env, folder, lastUid, uidvalidity, exists);
+    await updateFolderState(env, folder, Math.max(lastUid, ...allUids, 0), uidvalidity, exists);
     return { folder, newMessages: 0, lastUid, errors };
   }
 
   const totalPending = newUids.length;
-  if (newUids.length > MAX_MESSAGES_PER_SYNC) {
-    newUids = newUids.slice(0, MAX_MESSAGES_PER_SYNC);
-    console.log(`${folder}: processing ${MAX_MESSAGES_PER_SYNC} of ${totalPending} pending messages`);
+  const cap = Math.min(budget, totalPending);
+  if (newUids.length > cap) {
+    newUids = newUids.slice(0, cap);
+    console.log(`${folder}: processing ${cap} of ${totalPending} pending messages`);
   }
 
   let maxUid = lastUid;
