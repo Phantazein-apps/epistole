@@ -15,6 +15,7 @@
 import { Hono } from "hono";
 import type { AuthRequest, OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { connect } from "cloudflare:sockets";
+import { runIncrementalSync } from "./sync/incremental.js";
 import type { Env } from "./types.js";
 
 type Bindings = Env & { OAUTH_PROVIDER: OAuthHelpers };
@@ -23,6 +24,7 @@ const app = new Hono<{ Bindings: Bindings }>();
 
 const CODE_TTL = 300; // 5 minutes
 const CODE_LENGTH = 6;
+const SESSION_TTL = 600; // 10 minutes for the success page to be useful
 
 // ── Step 1: Show email form ────────────────────────────────────────────
 
@@ -106,7 +108,7 @@ app.post("/authorize/verify", async (c) => {
 
   const oauthReqInfo: AuthRequest = JSON.parse(stored);
 
-  // Complete the OAuth flow
+  // Complete the OAuth flow — get the redirect URL but don't redirect yet
   const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
     request: oauthReqInfo,
     userId: email,
@@ -120,7 +122,87 @@ app.post("/authorize/verify", async (c) => {
     },
   });
 
-  return c.redirect(redirectTo);
+  // Kick off a background sync so it's already running by the time the user
+  // gets back to Claude.  Fire-and-forget — no await.
+  const jobId = crypto.randomUUID().substring(0, 8);
+  await c.env.DB.prepare(
+    "INSERT INTO sync_jobs (job_id, status, started_at, folders, full_sync) VALUES (?, 'running', ?, 'all', 0)"
+  )
+    .bind(jobId, new Date().toISOString())
+    .run();
+
+  // Use a non-awaited promise so the response returns immediately
+  (async () => {
+    try {
+      const results = await runIncrementalSync(c.env);
+      const totalNew = results.reduce((s, r) => s + r.newMessages, 0);
+      const errors = results.flatMap((r) => r.errors);
+      await c.env.DB.prepare(
+        "UPDATE sync_jobs SET status = 'completed', finished_at = ?, error = ? WHERE job_id = ?"
+      )
+        .bind(
+          new Date().toISOString(),
+          errors.length > 0 ? errors.join("; ").slice(0, 500) : null,
+          jobId
+        )
+        .run();
+      console.log(`Auto-sync ${jobId} complete: ${totalNew} new messages`);
+    } catch (err: any) {
+      await c.env.DB.prepare(
+        "UPDATE sync_jobs SET status = 'failed', finished_at = ?, error = ? WHERE job_id = ?"
+      )
+        .bind(new Date().toISOString(), err.message?.slice(0, 500) || "unknown", jobId)
+        .run();
+    }
+  })().catch(() => {});
+
+  // Store a short-lived session so the success page can poll for progress
+  // without being authenticated yet
+  const sessionId = crypto.randomUUID();
+  await c.env.OAUTH_KV.put(
+    `session:${sessionId}`,
+    JSON.stringify({ jobId, redirectTo, startedAt: Date.now() }),
+    { expirationTtl: SESSION_TTL }
+  );
+
+  return c.html(successPage(sessionId, redirectTo));
+});
+
+// ── Sync progress endpoint (called by JS on success page) ──────────────
+
+app.get("/sync-progress", async (c) => {
+  const sessionId = c.req.query("session");
+  if (!sessionId) {
+    return c.json({ error: "Missing session" }, 400);
+  }
+
+  const sessionData = await c.env.OAUTH_KV.get(`session:${sessionId}`);
+  if (!sessionData) {
+    return c.json({ error: "Session expired" }, 404);
+  }
+
+  const { jobId } = JSON.parse(sessionData);
+
+  const job = await c.env.DB.prepare(
+    "SELECT status, started_at, finished_at, error FROM sync_jobs WHERE job_id = ?"
+  )
+    .bind(jobId)
+    .first<{ status: string; started_at: string; finished_at: string | null; error: string | null }>();
+
+  const indexed = await c.env.DB.prepare("SELECT COUNT(*) as cnt FROM emails").first<{ cnt: number }>();
+
+  const folderRows = await c.env.DB.prepare(
+    "SELECT folder, message_count, last_sync_at FROM folder_state ORDER BY message_count DESC"
+  ).all<{ folder: string; message_count: number; last_sync_at: string | null }>();
+
+  return c.json({
+    status: job?.status || "unknown",
+    started_at: job?.started_at,
+    finished_at: job?.finished_at,
+    error: job?.error,
+    indexed_total: indexed?.cnt || 0,
+    folders: folderRows.results,
+  });
 });
 
 // ── Health check ───────────────────────────────────────────────────────
@@ -311,6 +393,155 @@ function codePage(stateId: string, email: string, error: string | null): string 
     </form>
     <p class="note">Code expires in 5 minutes.</p>
   </div>
+</body>
+</html>`;
+}
+
+function successPage(sessionId: string, redirectTo: string): string {
+  // Encode redirect URL safely for use in HTML attributes / JS
+  const safeRedirect = redirectTo.replace(/"/g, "&quot;").replace(/'/g, "\\'");
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Epistole — Connected</title>
+  <style>
+    ${STYLES}
+    .card { max-width: 460px; }
+    .check {
+      width: 56px; height: 56px; margin: 0 auto 1rem;
+      border-radius: 50%; background: #16a34a;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 28px; color: white; font-weight: 700;
+    }
+    .stat-block {
+      background: #0a0a0a; border: 1px solid #2a2a2a; border-radius: 8px;
+      padding: 1rem; margin: 1.5rem 0;
+    }
+    .stat-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 0.5rem 0;
+    }
+    .stat-row + .stat-row { border-top: 1px solid #1a1a1a; }
+    .stat-label { color: #888; font-size: 0.85rem; }
+    .stat-value { color: #e5e5e5; font-weight: 500; }
+    .stat-value.running { color: #fbbf24; }
+    .stat-value.complete { color: #4ade80; }
+    .stat-value.failed { color: #f87171; }
+    .stat-value.indexed { font-size: 1.5rem; color: #4ade80; }
+    .pulse {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: #fbbf24; margin-right: 0.5rem;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .folder-list {
+      max-height: 120px; overflow-y: auto; font-size: 0.8rem;
+      color: #888; margin-top: 0.5rem;
+    }
+    .folder-row {
+      display: flex; justify-content: space-between;
+      padding: 0.25rem 0;
+    }
+    button.secondary {
+      background: transparent; color: #888; border: 1px solid #333;
+      margin-top: 0.5rem;
+    }
+    button.secondary:hover { background: #1a1a1a; color: #ccc; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="check">&#10003;</div>
+    <h1>You're connected!</h1>
+    <p class="subtitle">Epistole is now syncing your email in the background.</p>
+
+    <div class="stat-block">
+      <div class="stat-row">
+        <span class="stat-label">Sync status</span>
+        <span class="stat-value" id="status">
+          <span class="pulse"></span>Starting...
+        </span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Messages indexed</span>
+        <span class="stat-value indexed" id="indexed">0</span>
+      </div>
+      <div id="folder-block" style="display: none;">
+        <div class="stat-row" style="border-bottom: none;">
+          <span class="stat-label">Folders</span>
+        </div>
+        <div class="folder-list" id="folders"></div>
+      </div>
+    </div>
+
+    <button onclick="returnToClaude()">Return to Claude</button>
+    <button class="secondary" onclick="window.close()">Close this tab</button>
+
+    <p class="note">
+      The sync continues even after you close this tab — it runs on Cloudflare.
+      <br>You can also close Claude Desktop; sync runs every 15 minutes automatically.
+    </p>
+  </div>
+
+  <script>
+    const SESSION_ID = ${JSON.stringify(sessionId)};
+    const REDIRECT_URL = ${JSON.stringify(redirectTo)};
+
+    function returnToClaude() {
+      window.location.href = REDIRECT_URL;
+    }
+
+    async function pollProgress() {
+      try {
+        const resp = await fetch('/sync-progress?session=' + encodeURIComponent(SESSION_ID));
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        const statusEl = document.getElementById('status');
+        const indexedEl = document.getElementById('indexed');
+        const folderBlock = document.getElementById('folder-block');
+        const foldersEl = document.getElementById('folders');
+
+        indexedEl.textContent = (data.indexed_total || 0).toLocaleString();
+
+        if (data.status === 'running') {
+          statusEl.innerHTML = '<span class="pulse"></span>Syncing...';
+          statusEl.className = 'stat-value running';
+        } else if (data.status === 'completed') {
+          statusEl.textContent = '\u2713 Initial sync complete';
+          statusEl.className = 'stat-value complete';
+        } else if (data.status === 'failed') {
+          statusEl.textContent = 'Sync error';
+          statusEl.className = 'stat-value failed';
+        }
+
+        if (data.folders && data.folders.length > 0) {
+          folderBlock.style.display = 'block';
+          foldersEl.innerHTML = data.folders.map(f =>
+            '<div class="folder-row"><span>' + escapeHtml(f.folder) + '</span><span>' + (f.message_count || 0).toLocaleString() + '</span></div>'
+          ).join('');
+        }
+
+        // Stop polling once complete or failed
+        if (data.status === 'completed' || data.status === 'failed') {
+          return;
+        }
+      } catch (e) {
+        // Network error, keep polling
+      }
+      setTimeout(pollProgress, 2000);
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[c]));
+    }
+
+    pollProgress();
+  </script>
 </body>
 </html>`;
 }
