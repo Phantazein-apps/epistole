@@ -231,6 +231,72 @@ app.get("/sync-progress", async (c) => {
 
 app.get("/health", (c) => c.text("ok"));
 
+// ── Debug: test raw TLS socket to IMAP server ─────────────────────────
+
+app.get("/debug/imap", async (c) => {
+  const debugKey = c.req.query("key");
+  if (debugKey !== "epistole-debug") {
+    return c.json({ error: "Unauthorized. Add ?key=epistole-debug" }, 401);
+  }
+
+  const { ImapClient } = await import("./imap/client.js");
+  const stages: any[] = [];
+  const start = Date.now();
+  const mark = (stage: string, detail?: any) => {
+    stages.push({ stage, t: Date.now() - start, detail });
+  };
+
+  const client = new ImapClient({
+    host: c.env.IMAP_HOST,
+    port: parseInt(c.env.IMAP_PORT || "993"),
+    user: c.env.IMAP_USER,
+    pass: c.env.IMAP_PASS,
+  });
+
+  try {
+    mark("connecting");
+    await client.connect();
+    mark("connected-and-logged-in");
+
+    const folders = await client.list();
+    mark("listed", { count: folders.length });
+
+    const { exists, uidvalidity } = await client.select("INBOX");
+    mark("selected-inbox", { exists, uidvalidity });
+
+    // Fetch headers for most recent 3 messages
+    const allUids = await client.uidSearch("ALL");
+    mark("searched", { total: allUids.length });
+
+    const recent = allUids.slice(-3);
+    const headers = await client.uidFetchHeaders(recent);
+    mark("fetched-headers", {
+      count: headers.length,
+      subjects: headers.map((h) => h.subject),
+    });
+
+    return c.json({
+      success: true,
+      totalMs: Date.now() - start,
+      stages,
+      folders: folders.map((f) => f.path),
+    });
+  } catch (err: any) {
+    mark("error", { message: err.message });
+    return c.json(
+      {
+        success: false,
+        totalMs: Date.now() - start,
+        stages,
+        error: err.message,
+      },
+      500
+    );
+  } finally {
+    await client.disconnect();
+  }
+});
+
 // ── Catch-all ──────────────────────────────────────────────────────────
 
 app.all("*", (c) => c.text("Not Found", 404));

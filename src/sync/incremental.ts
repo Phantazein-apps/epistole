@@ -1,20 +1,18 @@
 /**
- * Incremental IMAP sync — runs via cron trigger or sync_now tool.
+ * Incremental IMAP sync — opens a short-lived IMAP connection per folder,
+ * pulls up to MAX_MESSAGES_PER_SYNC new messages, indexes into D1 +
+ * Vectorize, and stores attachments in R2.
  *
- * For each folder: fetch new UIDs since last sync, store metadata in D1,
- * attachments in R2, generate embeddings via Workers AI, upsert into Vectorize.
+ * Subsequent cron runs pick up any remaining messages.
  */
 
 import { simpleParser } from "mailparser";
-import { withImap, type ImapConfig, type ImapFlow } from "../imap/client.js";
+import { withImap, ImapClient, type ImapConfig } from "../imap/client.js";
 import type { Env } from "../types.js";
 
-const BATCH_SIZE = 25;
 const EMBED_BATCH = 50;
-const MAX_BODY_CHARS = 2000; // bge-base-en-v1.5 has 512 token limit
-// Cap each sync invocation to avoid Worker CPU/wall-time limits.
-// If there are more new messages, the next cron run picks them up.
-const MAX_MESSAGES_PER_SYNC = 100;
+const MAX_BODY_CHARS = 2000;
+const MAX_MESSAGES_PER_SYNC = 60; // fits well under Worker 30s CPU budget
 
 interface SyncResult {
   folder: string;
@@ -27,7 +25,9 @@ function addrStr(addr: any): string {
   if (!addr) return "";
   if (addr.text) return addr.text;
   if (Array.isArray(addr?.value)) {
-    return addr.value.map((a: any) => (a.name ? `${a.name} <${a.address}>` : a.address)).join(", ");
+    return addr.value
+      .map((a: any) => (a.name ? `${a.name} <${a.address}>` : a.address))
+      .join(", ");
   }
   return String(addr);
 }
@@ -45,19 +45,23 @@ export async function runIncrementalSync(
 
   const results: SyncResult[] = [];
 
+  // If folders not specified, list them ONCE with a fresh connection
   let folders = options.folders;
   if (!folders || folders.length === 0) {
     folders = await withImap(cfg, async (c) => {
       const list = await c.list();
-      return list.map((f: any) => f.path);
+      return list.map((f) => f.path);
     });
   }
 
   for (const folder of folders) {
     try {
-      const result = await syncFolder(env, cfg, folder, options.full || false);
+      const result = await withImap(cfg, (client) =>
+        syncFolder(env, client, folder, options.full || false)
+      );
       results.push(result);
     } catch (err: any) {
+      console.error(`Sync failed for ${folder}:`, err.message);
       results.push({
         folder,
         newMessages: 0,
@@ -72,7 +76,7 @@ export async function runIncrementalSync(
 
 async function syncFolder(
   env: Env,
-  cfg: ImapConfig,
+  client: ImapClient,
   folder: string,
   full: boolean
 ): Promise<SyncResult> {
@@ -87,125 +91,115 @@ async function syncFolder(
   let lastUid = stateRow?.last_uid || 0;
   const storedValidity = stateRow?.uidvalidity || 0;
 
-  return withImap(cfg, async (client) => {
-    const lock = await client.getMailboxLock(folder);
+  const { exists, uidvalidity } = await client.select(folder);
+
+  if (storedValidity > 0 && uidvalidity !== storedValidity) {
+    console.log(`UIDVALIDITY changed for ${folder}: ${storedValidity} → ${uidvalidity}. Re-indexing.`);
+    await env.DB.prepare("DELETE FROM emails WHERE folder = ?").bind(folder).run();
+    lastUid = 0;
+  }
+
+  if (full) lastUid = 0;
+
+  // Search for new UIDs
+  const criteria = lastUid > 0 ? `UID ${lastUid + 1}:*` : "ALL";
+  const allNew = await client.uidSearch(criteria);
+  let newUids = allNew.filter((u) => u > lastUid).sort((a, b) => a - b);
+
+  if (newUids.length === 0) {
+    await updateFolderState(env, folder, lastUid, uidvalidity, exists);
+    return { folder, newMessages: 0, lastUid, errors };
+  }
+
+  const totalPending = newUids.length;
+  if (newUids.length > MAX_MESSAGES_PER_SYNC) {
+    newUids = newUids.slice(0, MAX_MESSAGES_PER_SYNC);
+    console.log(`${folder}: processing ${MAX_MESSAGES_PER_SYNC} of ${totalPending} pending messages`);
+  }
+
+  let maxUid = lastUid;
+  const embedBatch: { id: string; text: string; metadata: Record<string, any> }[] = [];
+
+  for (const uid of newUids) {
     try {
-      const mbox: any = client.mailbox;
-      const uidvalidity = Number(mbox?.uidValidity || 0);
-      const exists = Number(mbox?.exists || 0);
+      const raw = await client.uidFetchBody(uid);
+      const parsed = await simpleParser(Buffer.from(raw));
 
-      if (storedValidity > 0 && uidvalidity !== storedValidity) {
-        console.log(`UIDVALIDITY changed for ${folder}: ${storedValidity} → ${uidvalidity}. Re-indexing.`);
-        await env.DB.prepare("DELETE FROM emails WHERE folder = ?").bind(folder).run();
-        lastUid = 0;
-      }
+      const subj = parsed.subject || "";
+      const from = addrStr(parsed.from);
+      const to = addrStr(parsed.to);
+      const body = parsed.text || "";
+      const msgId = parsed.messageId || "";
+      const replyTo = parsed.inReplyTo || "";
+      const date = parsed.date?.toISOString() || "";
 
-      if (full) lastUid = 0;
+      const atts = parsed.attachments || [];
+      const attFilenames = atts
+        .filter((a: any) => a.filename)
+        .map((a: any) => a.filename as string);
+      const hasAtts = attFilenames.length > 0;
+      const snippet = body.substring(0, 300);
+      const emailId = `${folder}:${uid}`;
 
-      // Search for new UIDs
-      const query: any = lastUid > 0 ? { uid: `${lastUid + 1}:*` } : { all: true };
-      const allNewUids = await client.search(query, { uid: true });
-      let newUids = (allNewUids || []).filter((u: number) => u > lastUid);
+      await env.DB.prepare(
+        `INSERT OR REPLACE INTO emails
+         (id, folder, uid, message_id, in_reply_to, subject, sender, recipients, date_iso, has_attachments, attachment_filenames, snippet, indexed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+        .bind(
+          emailId, folder, uid, msgId || null, replyTo || null,
+          subj, from, to, date,
+          hasAtts ? 1 : 0, JSON.stringify(attFilenames),
+          snippet, new Date().toISOString()
+        )
+        .run();
 
-      if (newUids.length === 0) {
-        await updateFolderState(env, folder, lastUid, uidvalidity, exists);
-        return { folder, newMessages: 0, lastUid, errors };
-      }
-
-      // Cap to MAX_MESSAGES_PER_SYNC oldest unsynced messages.
-      // The next cron run will pick up the rest.
-      const totalPending = newUids.length;
-      if (newUids.length > MAX_MESSAGES_PER_SYNC) {
-        newUids = newUids.sort((a: number, b: number) => a - b).slice(0, MAX_MESSAGES_PER_SYNC);
-        console.log(`${folder}: capping batch to ${MAX_MESSAGES_PER_SYNC} of ${totalPending} pending messages`);
-      }
-
-      let maxUid = lastUid;
-      const embedBatch: { id: string; text: string; metadata: Record<string, any> }[] = [];
-
-      for (let i = 0; i < newUids.length; i += BATCH_SIZE) {
-        const batch = newUids.slice(i, i + BATCH_SIZE);
-
-        for (const uid of batch) {
+      // Save attachments to R2
+      if (hasAtts) {
+        for (const att of atts) {
+          if (!att.filename || !att.content) continue;
+          const key = `attachments/${folder}/${uid}/${att.filename}`;
           try {
-            const raw = await client.download(String(uid), undefined, { uid: true });
-            if (!raw?.content) continue;
-
-            const chunks: Buffer[] = [];
-            for await (const chunk of raw.content as any) chunks.push(chunk as Buffer);
-            const buffer = Buffer.concat(chunks as any);
-            const parsed = await simpleParser(buffer);
-
-            const subj = parsed.subject || "";
-            const from = addrStr(parsed.from);
-            const to = addrStr(parsed.to);
-            const body = parsed.text || "";
-            const msgId = parsed.messageId || "";
-            const replyTo = parsed.inReplyTo || "";
-            const date = parsed.date?.toISOString() || "";
-
-            const atts = parsed.attachments || [];
-            const attFilenames = atts.filter((a: any) => a.filename).map((a: any) => a.filename as string);
-            const hasAtts = attFilenames.length > 0;
-            const snippet = body.substring(0, 300);
-            const emailId = `${folder}:${uid}`;
-
-            await env.DB.prepare(
-              `INSERT OR REPLACE INTO emails
-               (id, folder, uid, message_id, in_reply_to, subject, sender, recipients, date_iso, has_attachments, attachment_filenames, snippet, indexed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-            )
-              .bind(
-                emailId, folder, uid, msgId || null, replyTo || null,
-                subj, from, to, date,
-                hasAtts ? 1 : 0, JSON.stringify(attFilenames),
-                snippet, new Date().toISOString()
-              )
-              .run();
-
-            // Save attachments to R2
-            if (hasAtts) {
-              for (const att of atts) {
-                if (!att.filename || !att.content) continue;
-                const key = `attachments/${folder}/${uid}/${att.filename}`;
-                await env.R2.put(key, att.content);
-              }
-            }
-
-            const embedText = [subj, from, body].filter(Boolean).join("\n").substring(0, MAX_BODY_CHARS);
-
-            embedBatch.push({
-              id: emailId,
-              text: embedText,
-              metadata: {
-                folder, uid,
-                date: parsed.date ? parsed.date.getTime() / 1000 : 0,
-                sender: from, subject: subj,
-                has_attachment: hasAtts ? 1 : 0,
-              },
-            });
-
-            if (uid > maxUid) maxUid = uid;
-
-            if (embedBatch.length >= EMBED_BATCH) {
-              await flushEmbeddings(env, embedBatch.splice(0));
-            }
-          } catch (err: any) {
-            errors.push(`${folder}/UID ${uid}: ${err.message}`);
+            await env.R2.put(key, att.content);
+          } catch (r2err: any) {
+            console.warn(`R2 put failed for ${key}:`, r2err.message);
           }
         }
       }
 
-      if (embedBatch.length > 0) {
-        await flushEmbeddings(env, embedBatch);
-      }
+      const embedText = [subj, from, body]
+        .filter(Boolean)
+        .join("\n")
+        .substring(0, MAX_BODY_CHARS);
 
-      await updateFolderState(env, folder, maxUid, uidvalidity, exists);
-      return { folder, newMessages: newUids.length, lastUid: maxUid, errors };
-    } finally {
-      lock.release();
+      embedBatch.push({
+        id: emailId,
+        text: embedText,
+        metadata: {
+          folder, uid,
+          date: parsed.date ? parsed.date.getTime() / 1000 : 0,
+          sender: from, subject: subj,
+          has_attachment: hasAtts ? 1 : 0,
+        },
+      });
+
+      if (uid > maxUid) maxUid = uid;
+
+      if (embedBatch.length >= EMBED_BATCH) {
+        await flushEmbeddings(env, embedBatch.splice(0));
+      }
+    } catch (err: any) {
+      errors.push(`UID ${uid}: ${err.message}`);
+      console.error(`Failed UID ${uid} in ${folder}:`, err.message);
     }
-  });
+  }
+
+  if (embedBatch.length > 0) {
+    await flushEmbeddings(env, embedBatch);
+  }
+
+  await updateFolderState(env, folder, maxUid, uidvalidity, exists);
+  return { folder, newMessages: newUids.length, lastUid: maxUid, errors };
 }
 
 async function flushEmbeddings(
@@ -214,25 +208,34 @@ async function flushEmbeddings(
 ): Promise<void> {
   if (batch.length === 0) return;
 
-  const texts = batch.map((b) => b.text);
-  const response = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: texts });
-  const embeddings = (response as any).data as number[][];
+  try {
+    const texts = batch.map((b) => b.text);
+    const response = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: texts });
+    const embeddings = (response as any).data as number[][];
 
-  if (!embeddings || embeddings.length !== batch.length) {
-    console.error("Embedding count mismatch:", embeddings?.length, "vs", batch.length);
-    return;
+    if (!embeddings || embeddings.length !== batch.length) {
+      console.error(`Embedding count mismatch: ${embeddings?.length} vs ${batch.length}`);
+      return;
+    }
+
+    const vectors = batch.map((b, i) => ({
+      id: b.id,
+      values: embeddings[i],
+      metadata: b.metadata,
+    }));
+
+    await env.VECTORIZE.upsert(vectors);
+  } catch (err: any) {
+    console.error("flushEmbeddings failed:", err.message);
   }
-
-  const vectors = batch.map((b, i) => ({
-    id: b.id, values: embeddings[i], metadata: b.metadata,
-  }));
-
-  await env.VECTORIZE.upsert(vectors);
 }
 
 async function updateFolderState(
-  env: Env, folder: string, lastUid: number,
-  uidvalidity: number, messageCount: number
+  env: Env,
+  folder: string,
+  lastUid: number,
+  uidvalidity: number,
+  messageCount: number
 ): Promise<void> {
   await env.DB.prepare(
     `INSERT OR REPLACE INTO folder_state (folder, last_uid, uidvalidity, last_sync_at, message_count)
