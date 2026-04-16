@@ -26,6 +26,30 @@ For finding emails when you know specific terms/dates, prefer search_messages (I
       limit: z.number().default(10).describe("Maximum results"),
     },
     async ({ query, folders, date_from, date_to, sender, has_attachment, limit }) => {
+      // Check if the index has a significant backlog — if so, results will
+      // be incomplete and the model should prefer live IMAP search instead.
+      const indexedRow = await env.DB.prepare("SELECT COUNT(*) as cnt FROM emails").first<{ cnt: number }>();
+      const currentlyIndexed = indexedRow?.cnt || 0;
+      const folderStateRows = await env.DB.prepare(
+        "SELECT SUM(message_count) as total FROM folder_state"
+      ).first<{ total: number }>();
+      const totalOnServer = folderStateRows?.total || 0;
+
+      if (totalOnServer > 0 && currentlyIndexed < totalOnServer * 0.9) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: "index_incomplete",
+              currently_indexed: currentlyIndexed,
+              total_on_server: totalOnServer,
+              percent_indexed: Math.round((currentlyIndexed / totalOnServer) * 100),
+              message: `The search index has only ${currentlyIndexed} of ~${totalOnServer} messages indexed (${Math.round((currentlyIndexed / totalOnServer) * 100)}%). Results would be unreliable. Use the search_messages tool instead — it searches the live mailbox directly via IMAP and always returns current results. The index catches up automatically every 15 minutes.`,
+            }),
+          }],
+        };
+      }
+
       // Generate query embedding
       const embResponse = await env.AI.run("@cf/baai/bge-base-en-v1.5", {
         text: [query],
@@ -97,10 +121,6 @@ For finding emails when you know specific terms/dates, prefer search_messages (I
       const runningJob = await env.DB.prepare(
         "SELECT * FROM sync_jobs WHERE status = 'running' LIMIT 1"
       ).first();
-
-      // Check if anything has been indexed yet
-      const indexedRow = await env.DB.prepare("SELECT COUNT(*) as cnt FROM emails").first<{ cnt: number }>();
-      const currentlyIndexed = indexedRow?.cnt || 0;
 
       const result: any = {
         query,

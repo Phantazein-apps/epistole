@@ -115,12 +115,24 @@ Then add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 A cron trigger runs every 15 minutes:
 
 1. Connects to IMAP, checks each folder for new messages (by UID)
-2. Fetches new messages, stores metadata in D1, attachments in R2
+2. Fetches new messages (headers + first 20KB of body), stores metadata in D1
 3. Generates embeddings via Workers AI (`bge-base-en-v1.5`)
 4. Upserts vectors into Vectorize for semantic search
 5. Handles UIDVALIDITY changes (server rebuild) by re-indexing
 
 First sync after deployment: call `sync_now` to bootstrap. Subsequent syncs are automatic.
+
+### Sync budget
+
+Each sync run processes up to **200 messages** across all folders (configurable via `MAX_MESSAGES_PER_INVOCATION` in `src/sync/incremental.ts`). This cap exists because Cloudflare Workers have a 30-second CPU time limit on cron triggers. At 200 messages per run and a cron every 15 minutes, the system indexes up to ~19,200 messages/day — enough to keep up with any normal mailbox.
+
+If you have a very large mailbox (50K+ messages), the first full index may take several hours to catch up. During this period, **semantic search is automatically disabled** — it returns an `index_incomplete` error and tells Claude to use `search_messages` (live IMAP search) instead. This prevents stale or misleading results. Once the index reaches 90% of the server-side message count, semantic search re-enables itself.
+
+Folders are synced in priority order: INBOX first, then Sent, Archive, and the rest alphabetically. This ensures your most important mail is searchable first.
+
+## Status Dashboard
+
+Visit `https://<your-worker>/status` (e.g. `https://email-mcp.your-subdomain.workers.dev/status` or `https://mail.yourdomain.com/status`) to check sync progress anytime. The page is protected by the same email verification flow — you'll need to enter a one-time code sent to your inbox. No login or password required.
 
 ## Security
 

@@ -14,7 +14,7 @@ const EMBED_BATCH = 20;
 const MAX_BODY_CHARS = 2000;
 // Total cap across ALL folders per invocation. Subsequent cron runs
 // (every 15 min) catch up. Set conservatively to fit Worker 30s CPU.
-const MAX_MESSAGES_PER_INVOCATION = 40;
+const MAX_MESSAGES_PER_INVOCATION = 200;
 // Prioritize these folders — INBOX first so user sees their main mail ASAP.
 const FOLDER_PRIORITY = ["INBOX", "Sent", "Archive"];
 

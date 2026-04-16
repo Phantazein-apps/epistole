@@ -217,12 +217,15 @@ app.get("/sync-progress", async (c) => {
     "SELECT folder, message_count, last_sync_at FROM folder_state ORDER BY message_count DESC"
   ).all<{ folder: string; message_count: number; last_sync_at: string | null }>();
 
+  const totalOnServer = folderRows.results.reduce((s, r) => s + (r.message_count || 0), 0);
+
   return c.json({
     status: job?.status || "unknown",
     started_at: job?.started_at,
     finished_at: job?.finished_at,
     error: job?.error,
     indexed_total: indexed?.cnt || 0,
+    total_on_server: totalOnServer,
     folders: folderRows.results,
   });
 });
@@ -373,6 +376,97 @@ app.get("/debug/imap", async (c) => {
   }
 });
 
+// ── Standalone status page (email-verified) ──────────────────────────
+
+app.get("/status", async (c) => {
+  const email = c.env.EMAIL_ADDRESS || "";
+  const maskedEmail = email.replace(/^(.)(.*)(@.*)$/, (_: string, first: string, middle: string, domain: string) =>
+    first + middle.replace(/./g, "\u2022") + domain
+  );
+  const stateId = crypto.randomUUID();
+  await c.env.OAUTH_KV.put(
+    `status:state:${stateId}`,
+    email,
+    { expirationTtl: CODE_TTL + 60 }
+  );
+  return c.html(statusEmailPage(stateId, maskedEmail, null));
+});
+
+app.post("/status", async (c) => {
+  const body = await c.req.parseBody();
+  const stateId = body.state as string;
+  const email = c.env.EMAIL_ADDRESS.toLowerCase();
+
+  const stored = await c.env.OAUTH_KV.get(`status:state:${stateId}`);
+  if (!stored) return c.text("Session expired. Please try again.", 400);
+
+  const code = generateCode();
+  await c.env.OAUTH_KV.put(`status:code:${stateId}`, code, { expirationTtl: CODE_TTL });
+
+  try {
+    await sendVerificationEmail(c.env, email, code);
+  } catch (err: any) {
+    return c.html(statusEmailPage(stateId, email, `Failed to send email: ${err.message}`));
+  }
+
+  return c.html(statusCodePage(stateId, email, null));
+});
+
+app.post("/status/verify", async (c) => {
+  const body = await c.req.parseBody();
+  const stateId = body.state as string;
+  const enteredCode = (body.code as string || "").trim();
+
+  const stored = await c.env.OAUTH_KV.get(`status:state:${stateId}`);
+  if (!stored) return c.text("Session expired. Please start over.", 400);
+
+  const correctCode = await c.env.OAUTH_KV.get(`status:code:${stateId}`);
+  if (!correctCode) return c.html(statusCodePage(stateId, stored, "Code expired. Go back and request a new one."));
+  if (enteredCode !== correctCode) return c.html(statusCodePage(stateId, stored, "Incorrect code. Check your email and try again."));
+
+  await c.env.OAUTH_KV.delete(`status:code:${stateId}`);
+  await c.env.OAUTH_KV.delete(`status:state:${stateId}`);
+
+  const sessionId = crypto.randomUUID();
+  await c.env.OAUTH_KV.put(
+    `status-session:${sessionId}`,
+    JSON.stringify({ email: stored, verifiedAt: Date.now() }),
+    { expirationTtl: SESSION_TTL }
+  );
+
+  return c.html(statusDashboardPage(sessionId));
+});
+
+app.get("/status/progress", async (c) => {
+  const sessionId = c.req.query("session");
+  if (!sessionId) return c.json({ error: "Missing session" }, 400);
+
+  const sessionData = await c.env.OAUTH_KV.get(`status-session:${sessionId}`);
+  if (!sessionData) return c.json({ error: "Session expired" }, 404);
+
+  const indexed = await c.env.DB.prepare("SELECT COUNT(*) as cnt FROM emails").first<{ cnt: number }>();
+
+  const folderRows = await c.env.DB.prepare(
+    "SELECT folder, message_count, last_sync_at FROM folder_state ORDER BY message_count DESC"
+  ).all<{ folder: string; message_count: number; last_sync_at: string | null }>();
+
+  const latestJob = await c.env.DB.prepare(
+    "SELECT status, started_at, finished_at, error FROM sync_jobs ORDER BY started_at DESC LIMIT 1"
+  ).first<{ status: string; started_at: string; finished_at: string | null; error: string | null }>();
+
+  const totalOnServer = folderRows.results.reduce((s, r) => s + (r.message_count || 0), 0);
+
+  return c.json({
+    status: latestJob?.status || "unknown",
+    started_at: latestJob?.started_at,
+    finished_at: latestJob?.finished_at,
+    error: latestJob?.error,
+    indexed_total: indexed?.cnt || 0,
+    total_on_server: totalOnServer,
+    folders: folderRows.results,
+  });
+});
+
 // ── Catch-all ──────────────────────────────────────────────────────────
 
 app.all("*", (c) => c.text("Not Found", 404));
@@ -500,6 +594,13 @@ const STYLES = `
   }
   .note { text-align: center; color: #666; font-size: 0.75rem; margin-top: 1.5rem; }
   .sent { text-align: center; color: #4ade80; font-size: 0.85rem; margin-bottom: 1.5rem; }
+  button:disabled { opacity: 0.7; cursor: wait; }
+  .spinner {
+    display: inline-block; width: 16px; height: 16px; border: 2px solid #666;
+    border-top-color: #0a0a0a; border-radius: 50%; margin-right: 0.5rem;
+    vertical-align: middle; animation: spin 0.6s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 `;
 
 function confirmPage(stateId: string, email: string, error: string | null): string {
@@ -523,10 +624,17 @@ function confirmPage(stateId: string, email: string, error: string | null): stri
       To verify you own this inbox, we'll send a<br>one-time code to <strong>${maskedEmail}</strong>
     </p>
     ${error ? `<div class="error">${error}</div>` : ""}
-    <form method="POST" action="/authorize">
+    <form method="POST" action="/authorize" id="send-form">
       <input type="hidden" name="state" value="${stateId}">
-      <button type="submit">Send verification code</button>
+      <button type="submit" id="send-btn">Send verification code</button>
     </form>
+    <script>
+      document.getElementById('send-form').addEventListener('submit', function() {
+        var btn = document.getElementById('send-btn');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span>Sending\u2026';
+      });
+    </script>
     <p class="note">The code expires in 5 minutes. No password is stored.</p>
   </div>
 </body>
@@ -630,6 +738,10 @@ function successPage(sessionId: string): string {
         <span class="stat-label">Messages indexed</span>
         <span class="stat-value indexed" id="indexed">0</span>
       </div>
+      <div id="progress-row" class="stat-row" style="display: none;">
+        <span class="stat-label">Progress</span>
+        <span class="stat-value" id="progress" style="font-size: 0.85rem;"></span>
+      </div>
       <div id="folder-block" style="display: none;">
         <div class="stat-row" style="border-bottom: none;">
           <span class="stat-label">Folders</span>
@@ -638,9 +750,12 @@ function successPage(sessionId: string): string {
       </div>
     </div>
 
-    <button onclick="returnToClaude()">Return to Claude</button>
+    <button onclick="returnToClaude()" id="return-btn">Return to Claude</button>
     <button class="secondary" onclick="window.close()">Close this tab (sync continues)</button>
 
+    <p class="note" id="return-hint" style="display:none; color:#4ade80;">
+      Click the button above to finish setup \u2014 it activates your email in Claude.
+    </p>
     <p class="note">
       The sync continues even after you close this tab — it runs on Cloudflare.
       <br>You can also close Claude Desktop; sync runs every 15 minutes automatically.
@@ -670,15 +785,31 @@ function successPage(sessionId: string): string {
 
         indexedEl.textContent = (data.indexed_total || 0).toLocaleString();
 
+        var progressRow = document.getElementById('progress-row');
+        var progressEl = document.getElementById('progress');
+        if (data.total_on_server && data.total_on_server > 0) {
+          var pct = Math.round((data.indexed_total / data.total_on_server) * 100);
+          progressRow.style.display = 'flex';
+          progressEl.textContent = pct + '% of ~' + data.total_on_server.toLocaleString() + ' messages';
+          progressEl.style.color = pct >= 90 ? '#4ade80' : '#fbbf24';
+        }
+
+        var returnBtn = document.getElementById('return-btn');
+        var hintEl = document.getElementById('return-hint');
+
         if (data.status === 'running') {
           statusEl.innerHTML = '<span class="pulse"></span>Syncing...';
           statusEl.className = 'stat-value running';
         } else if (data.status === 'completed') {
           statusEl.textContent = '\u2713 Initial sync complete';
           statusEl.className = 'stat-value complete';
+          returnBtn.textContent = 'Activate in Claude';
+          hintEl.style.display = 'block';
         } else if (data.status === 'failed') {
           statusEl.textContent = 'Sync error';
           statusEl.className = 'stat-value failed';
+          returnBtn.textContent = 'Activate in Claude';
+          hintEl.style.display = 'block';
         }
 
         if (data.folders && data.folders.length > 0) {
@@ -702,6 +833,222 @@ function successPage(sessionId: string): string {
       return String(s).replace(/[&<>"']/g, c => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
       }[c]));
+    }
+
+    pollProgress();
+  </script>
+</body>
+</html>`;
+}
+
+// ── Status page templates ─────────────────────────────────────────────
+
+function statusEmailPage(stateId: string, maskedEmail: string, error: string | null): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Epistole — Sync Status</title>
+  <style>${STYLES}</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">&#9993;</div>
+    <h1>Epistole Status</h1>
+    <p class="subtitle">Verify your identity to view sync progress</p>
+    <p style="text-align:center; color:#ccc; font-size:0.9rem; margin-bottom:1.5rem;">
+      We'll send a one-time code to <strong>${maskedEmail}</strong>
+    </p>
+    ${error ? `<div class="error">${error}</div>` : ""}
+    <form method="POST" action="/status" id="send-form">
+      <input type="hidden" name="state" value="${stateId}">
+      <button type="submit" id="send-btn">Send verification code</button>
+    </form>
+    <script>
+      document.getElementById('send-form').addEventListener('submit', function() {
+        var btn = document.getElementById('send-btn');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span>Sending\u2026';
+      });
+    </script>
+    <p class="note">The code expires in 5 minutes.</p>
+  </div>
+</body>
+</html>`;
+}
+
+function statusCodePage(stateId: string, email: string, error: string | null): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Epistole — Enter Code</title>
+  <style>${STYLES}</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">&#9993;</div>
+    <h1>Check your email</h1>
+    <p class="sent">Code sent to ${email}</p>
+    ${error ? `<div class="error">${error}</div>` : ""}
+    <form method="POST" action="/status/verify">
+      <input type="hidden" name="state" value="${stateId}">
+      <label for="code">Verification code</label>
+      <input type="text" id="code" name="code" class="code-input" maxlength="6" pattern="[0-9]{6}" placeholder="000000" autofocus required autocomplete="one-time-code" inputmode="numeric">
+      <button type="submit">Verify</button>
+    </form>
+    <p class="note">Code expires in 5 minutes.</p>
+  </div>
+</body>
+</html>`;
+}
+
+function statusDashboardPage(sessionId: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Epistole — Sync Status</title>
+  <style>
+    ${STYLES}
+    .card { max-width: 460px; }
+    .stat-block {
+      background: #0a0a0a; border: 1px solid #2a2a2a; border-radius: 8px;
+      padding: 1rem; margin: 1.5rem 0;
+    }
+    .stat-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 0.5rem 0;
+    }
+    .stat-row + .stat-row { border-top: 1px solid #1a1a1a; }
+    .stat-label { color: #888; font-size: 0.85rem; }
+    .stat-value { color: #e5e5e5; font-weight: 500; }
+    .stat-value.running { color: #fbbf24; }
+    .stat-value.complete { color: #4ade80; }
+    .stat-value.failed { color: #f87171; }
+    .stat-value.indexed { font-size: 1.5rem; color: #4ade80; }
+    .pulse {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: #fbbf24; margin-right: 0.5rem;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .folder-list {
+      max-height: 200px; overflow-y: auto; font-size: 0.8rem;
+      color: #888; margin-top: 0.5rem;
+    }
+    .folder-row {
+      display: flex; justify-content: space-between;
+      padding: 0.25rem 0;
+    }
+    .last-sync { color: #666; font-size: 0.8rem; text-align: center; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">&#9993;</div>
+    <h1>Epistole Sync Status</h1>
+    <p class="subtitle">Real-time view of your email index</p>
+
+    <div class="stat-block">
+      <div class="stat-row">
+        <span class="stat-label">Last sync</span>
+        <span class="stat-value" id="status">Checking\u2026</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Messages indexed</span>
+        <span class="stat-value indexed" id="indexed">0</span>
+      </div>
+      <div id="progress-row" class="stat-row" style="display: none;">
+        <span class="stat-label">Progress</span>
+        <span class="stat-value" id="progress" style="font-size: 0.85rem;"></span>
+      </div>
+      <div id="folder-block" style="display: none;">
+        <div class="stat-row" style="border-bottom: none;">
+          <span class="stat-label">Folders</span>
+        </div>
+        <div class="folder-list" id="folders"></div>
+      </div>
+    </div>
+
+    <p id="last-sync-time" class="last-sync"></p>
+
+    <p class="note">
+      Sync runs automatically every 15 minutes on Cloudflare.
+      <br>This page refreshes every 10 seconds.
+    </p>
+  </div>
+
+  <script>
+    const SESSION_ID = ${JSON.stringify(sessionId)};
+
+    async function pollProgress() {
+      try {
+        const resp = await fetch('/status/progress?session=' + encodeURIComponent(SESSION_ID));
+        if (!resp.ok) {
+          if (resp.status === 404) {
+            document.getElementById('status').textContent = 'Session expired';
+            return;
+          }
+          return;
+        }
+        const data = await resp.json();
+
+        const statusEl = document.getElementById('status');
+        const indexedEl = document.getElementById('indexed');
+        const folderBlock = document.getElementById('folder-block');
+        const foldersEl = document.getElementById('folders');
+        const lastSyncEl = document.getElementById('last-sync-time');
+        var progressRow = document.getElementById('progress-row');
+        var progressEl = document.getElementById('progress');
+
+        indexedEl.textContent = (data.indexed_total || 0).toLocaleString();
+
+        if (data.total_on_server && data.total_on_server > 0) {
+          var pct = Math.round((data.indexed_total / data.total_on_server) * 100);
+          progressRow.style.display = 'flex';
+          progressEl.textContent = pct + '% of ~' + data.total_on_server.toLocaleString() + ' messages';
+          progressEl.style.color = pct >= 90 ? '#4ade80' : '#fbbf24';
+        }
+
+        if (data.status === 'running') {
+          statusEl.innerHTML = '<span class="pulse"></span>Syncing now\u2026';
+          statusEl.className = 'stat-value running';
+        } else if (data.status === 'completed') {
+          statusEl.textContent = '\\u2713 Completed';
+          statusEl.className = 'stat-value complete';
+        } else if (data.status === 'failed') {
+          statusEl.textContent = 'Last sync failed';
+          statusEl.className = 'stat-value failed';
+        } else {
+          statusEl.textContent = 'No sync data yet';
+        }
+
+        if (data.finished_at) {
+          var d = new Date(data.finished_at);
+          lastSyncEl.textContent = 'Last finished: ' + d.toLocaleString();
+        } else if (data.started_at) {
+          var d = new Date(data.started_at);
+          lastSyncEl.textContent = 'Started: ' + d.toLocaleString();
+        }
+
+        if (data.folders && data.folders.length > 0) {
+          folderBlock.style.display = 'block';
+          foldersEl.innerHTML = data.folders.map(function(f) {
+            return '<div class="folder-row"><span>' + escapeHtml(f.folder) + '</span><span>' + (f.message_count || 0).toLocaleString() + '</span></div>';
+          }).join('');
+        }
+      } catch (e) {}
+      setTimeout(pollProgress, 10000);
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, function(c) {
+        return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+      });
     }
 
     pollProgress();
