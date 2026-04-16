@@ -134,12 +134,14 @@ This is commonly the first tool called after a user connects Epistole. If this i
   // ── get_message ──────────────────────────────────────────────────────
   server.tool(
     "get_message",
-    "Get the full content of a specific message by UID.",
+    "Get the content of a specific message by UID. Returns headers, text body (first 20KB), and attachment metadata. For large messages with attachments, the body is truncated to avoid timeouts.",
     { uid: z.number(), folder: z.string().default("INBOX") },
     async ({ uid, folder }) => {
       const result = await withImap(imapConfig(env), async (c) => {
         await c.select(folder);
-        const raw = await c.uidFetchBody(uid);
+        // Use lightweight fetch (headers + 20KB body) to avoid crashing
+        // on large messages. Full body available via get_attachments.
+        const raw = await c.uidFetchIndexable(uid, 50_000);
         const parsed = await simpleParser(Buffer.from(raw));
         return {
           uid, folder,
