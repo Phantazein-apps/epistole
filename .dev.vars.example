@@ -9,3 +9,9 @@ SMTP_PASS=your-password
 EMAIL_ADDRESS=you@example.com
 FULL_NAME=Your Name
 MCP_TOKEN=change-me-to-a-random-string
+
+# Optional — shared secret with Hermeneia (WhatsApp bridge MCP). When set,
+# enables /api/wa/push and /api/wa/heartbeat endpoints so Hermeneia can
+# mirror WhatsApp events into Epistole for unified semantic_search. Leave
+# unset (or empty) to keep the WhatsApp bridge disabled.
+# WA_BRIDGE_TOKEN=

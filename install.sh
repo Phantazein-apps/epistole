@@ -339,6 +339,43 @@ set_secret "FULL_NAME" "$FULL_NAME"
 
 ok "All 10 secrets set (encrypted in Cloudflare)"
 
+# ── WhatsApp bridge (optional) ──────────────────────────────────────────
+header "WhatsApp bridge (optional)"
+
+echo ""
+echo -e "  ${BOLD}Hermeneia${NC} is a separate desktop-only WhatsApp MCP. It can mirror"
+echo -e "  WhatsApp events into this Epistole instance so ${BOLD}semantic_search${NC}"
+echo -e "  finds WhatsApp messages alongside email — from any device, including"
+echo -e "  the Claude mobile apps. If you don't use Hermeneia, skip this."
+echo -e "  ${DIM}Details: https://github.com/Phantazein-apps/hermeneia${NC}"
+echo ""
+ask "Enable WhatsApp bridge endpoint? [y/N]"
+read WA_ENABLE
+WA_ENABLE="${WA_ENABLE:-N}"
+
+WA_TOKEN=""
+if [[ "$WA_ENABLE" =~ ^[Yy] ]]; then
+  # Generate a random 32-byte token (hex-encoded, 64 chars). openssl is
+  # ubiquitous on macOS and most Linux; fall back to /dev/urandom otherwise.
+  if command -v openssl &>/dev/null; then
+    WA_TOKEN=$(openssl rand -hex 32)
+  else
+    WA_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  fi
+  set_secret "WA_BRIDGE_TOKEN" "$WA_TOKEN"
+
+  echo ""
+  echo -e "  ${YELLOW}⚠  Save this token now — Cloudflare won't show it again.${NC}"
+  echo ""
+  echo -e "      ${BOLD}${CYAN}$WA_TOKEN${NC}"
+  echo ""
+  echo -e "  ${DIM}Paste into Hermeneia → Settings → Extensions →${NC}"
+  echo -e "  ${DIM}WhatsApp (Hermeneia) → Epistole mirror token.${NC}"
+  echo ""
+  ask "Press Enter once you've saved the token..."
+  read _
+fi
+
 # ── Custom domain ──────────────────────────────────────────────────────
 header "Custom domain (optional)"
 
@@ -565,3 +602,15 @@ echo -e "  ${DIM}Server files: $INSTALL_DIR${NC}"
 echo -e "  ${DIM}Email credentials are encrypted as Cloudflare Worker secrets.${NC}"
 echo -e "  ${DIM}No passwords or tokens stored anywhere — login is always via email code.${NC}"
 echo ""
+
+# Re-display the WhatsApp bridge token one last time so users who scrolled
+# past the earlier prompt still see it. Cloudflare will never reveal it again.
+if [ -n "$WA_TOKEN" ]; then
+  header "WhatsApp bridge token (save this)"
+  echo ""
+  echo -e "      ${BOLD}${CYAN}$WA_TOKEN${NC}"
+  echo ""
+  echo -e "  ${DIM}Hermeneia → Settings → Extensions → WhatsApp (Hermeneia) →${NC}"
+  echo -e "  ${DIM}Epistole mirror token. See github.com/Phantazein-apps/hermeneia${NC}"
+  echo ""
+fi
