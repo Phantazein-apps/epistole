@@ -16,11 +16,15 @@ import { Hono } from "hono";
 import type { AuthRequest, OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { connect } from "cloudflare:sockets";
 import { runIncrementalSync } from "./sync/incremental.js";
+import waHandler from "./wa/handler.js";
 import type { Env } from "./types.js";
 
 type Bindings = Env & { OAUTH_PROVIDER: OAuthHelpers };
 
 const app = new Hono<{ Bindings: Bindings }>();
+
+// WhatsApp bridge API (bearer-auth via WA_BRIDGE_TOKEN; see src/wa/handler.ts)
+app.route("/api/wa", waHandler);
 
 const CODE_TTL = 300; // 5 minutes
 const CODE_LENGTH = 6;
@@ -374,6 +378,56 @@ app.get("/debug/imap", async (c) => {
   } finally {
     await client.disconnect();
   }
+});
+
+// ── Debug: backfill channel:"email" metadata on existing vectors ─────
+// Existing email vectors were upserted before the unified channel scheme.
+// This re-reads each vector's values via Vectorize.getByIds and re-upserts
+// with channel:"email" added to the metadata (without re-embedding).
+app.get("/debug/backfill-channel", async (c) => {
+  if (c.req.query("key") !== "epistole-debug") {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+  const limit = Math.min(parseInt(c.req.query("limit") || "200"), 500);
+  const offset = parseInt(c.req.query("offset") || "0");
+
+  const rows = await c.env.DB.prepare(
+    "SELECT id FROM emails ORDER BY id LIMIT ? OFFSET ?"
+  )
+    .bind(limit, offset)
+    .all<{ id: string }>();
+
+  const ids = rows.results.map((r) => r.id);
+  if (ids.length === 0) {
+    return c.json({ done: true, processed: 0, offset });
+  }
+
+  let updated = 0;
+  let skipped = 0;
+  // Vectorize getByIds in chunks of 100 (service cap)
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    const existing = await (c.env.VECTORIZE as any).getByIds(chunk);
+    const toUpsert = (existing as { id: string; values: number[]; metadata?: Record<string, any> }[])
+      .filter((v) => v?.values?.length)
+      .map((v) => {
+        const meta = { ...(v.metadata || {}), channel: "email" };
+        return { id: v.id, values: v.values, metadata: meta };
+      });
+    skipped += chunk.length - toUpsert.length;
+    if (toUpsert.length > 0) {
+      await c.env.VECTORIZE.upsert(toUpsert);
+      updated += toUpsert.length;
+    }
+  }
+
+  return c.json({
+    processed: ids.length,
+    updated,
+    skipped,
+    next_offset: offset + limit,
+    hint: `Call again with ?key=…&offset=${offset + limit} until processed < ${limit}`,
+  });
 });
 
 // ── Standalone status page (email-verified) ──────────────────────────

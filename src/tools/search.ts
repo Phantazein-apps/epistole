@@ -11,23 +11,25 @@ export function registerSearchTools(server: McpServer, env: Env) {
   // ── semantic_search ──────────────────────────────────────────────────
   server.tool(
     "semantic_search",
-    `Search emails by meaning using local vector search. Finds messages whose content is semantically similar to the query (subject, body, and PDF text).
+    `Search emails and WhatsApp messages by meaning using local vector search. One unified index spans both channels.
 
-Requires prior sync via sync_now. If this returns zero results and currently_indexed=0, the user has not yet run sync_now. Tell them to do so.
+Requires prior sync via sync_now (for email) and/or an active WhatsApp bridge (for WhatsApp). If this returns zero results and currently_indexed=0, the user has not yet run sync_now. Tell them to do so.
 
-For finding emails when you know specific terms/dates, prefer search_messages (IMAP-level search). Use semantic_search for concept-based queries like "emails about the contract renewal" or "messages about Q4 revenue".`,
+For finding emails when you know specific terms/dates, prefer search_messages (IMAP-level search). Use semantic_search for concept-based queries like "messages about the contract renewal" or "discussions about Q4 revenue".`,
     {
       query: z.string().describe("Natural language search query"),
-      folders: z.string().optional().describe("Comma-separated folder names to restrict search"),
+      channel: z.enum(["email", "whatsapp", "all"]).default("all").describe("Which channel(s) to search"),
+      folders: z.string().optional().describe("Comma-separated email folder names (email channel only)"),
+      wa_account: z.string().optional().describe("Restrict to a single WhatsApp account (whatsapp channel only)"),
+      wa_chat_jid: z.string().optional().describe("Restrict to a single WhatsApp chat (whatsapp channel only)"),
       date_from: z.string().optional().describe("ISO date (YYYY-MM-DD) — only messages on or after"),
       date_to: z.string().optional().describe("ISO date (YYYY-MM-DD) — only messages on or before"),
-      sender: z.string().optional().describe("Filter by sender address or name"),
-      has_attachment: z.boolean().optional().describe("Filter to messages with/without attachments"),
+      sender: z.string().optional().describe("Filter by sender address or name (email) / jid substring (whatsapp)"),
+      has_attachment: z.boolean().optional().describe("Email only: filter to messages with/without attachments"),
       limit: z.number().default(10).describe("Maximum results"),
     },
-    async ({ query, folders, date_from, date_to, sender, has_attachment, limit }) => {
-      // Check if the index has a significant backlog — if so, results will
-      // be incomplete and the model should prefer live IMAP search instead.
+    async ({ query, channel, folders, wa_account, wa_chat_jid, date_from, date_to, sender, has_attachment, limit }) => {
+      // Backlog guard only applies when email is in scope.
       const indexedRow = await env.DB.prepare("SELECT COUNT(*) as cnt FROM emails").first<{ cnt: number }>();
       const currentlyIndexed = indexedRow?.cnt || 0;
       const folderStateRows = await env.DB.prepare(
@@ -35,7 +37,7 @@ For finding emails when you know specific terms/dates, prefer search_messages (I
       ).first<{ total: number }>();
       const totalOnServer = folderStateRows?.total || 0;
 
-      if (totalOnServer > 0 && currentlyIndexed < totalOnServer * 0.9) {
+      if (channel !== "whatsapp" && totalOnServer > 0 && currentlyIndexed < totalOnServer * 0.9) {
         return {
           content: [{
             type: "text",
@@ -44,7 +46,7 @@ For finding emails when you know specific terms/dates, prefer search_messages (I
               currently_indexed: currentlyIndexed,
               total_on_server: totalOnServer,
               percent_indexed: Math.round((currentlyIndexed / totalOnServer) * 100),
-              message: `The search index has only ${currentlyIndexed} of ~${totalOnServer} messages indexed (${Math.round((currentlyIndexed / totalOnServer) * 100)}%). Results would be unreliable. Use the search_messages tool instead — it searches the live mailbox directly via IMAP and always returns current results. The index catches up automatically every 15 minutes.`,
+              message: `The email search index has only ${currentlyIndexed} of ~${totalOnServer} messages indexed (${Math.round((currentlyIndexed / totalOnServer) * 100)}%). Results would be unreliable. Use the search_messages tool instead — it searches the live mailbox directly via IMAP. The index catches up automatically every 15 minutes. (To search WhatsApp only, pass channel="whatsapp".)`,
             }),
           }],
         };
@@ -61,26 +63,25 @@ For finding emails when you know specific terms/dates, prefer search_messages (I
 
       // Build Vectorize metadata filter
       const filter: Record<string, any> = {};
-      if (folders) {
+      if (channel === "email") filter.channel = "email";
+      if (channel === "whatsapp") filter.channel = "whatsapp";
+      // For channel "all" we intentionally omit the channel filter so we
+      // also return legacy email vectors that pre-date the channel tag.
+      if (channel !== "whatsapp" && folders) {
         const folderList = folders.split(",").map((f) => f.trim());
-        if (folderList.length === 1) {
-          filter.folder = folderList[0];
-        } else {
-          filter.folder = { $in: folderList };
-        }
+        filter.folder = folderList.length === 1 ? folderList[0] : { $in: folderList };
       }
+      if (channel !== "email" && wa_account) filter.account_id = wa_account;
+      if (channel !== "email" && wa_chat_jid) filter.chat_jid = wa_chat_jid;
       if (date_from) {
         filter.date = { ...filter.date, $gte: new Date(date_from).getTime() / 1000 };
       }
       if (date_to) {
         filter.date = { ...filter.date, $lte: new Date(date_to).getTime() / 1000 };
       }
-      if (sender) {
-        // Vectorize doesn't support $contains, so we skip sender filter in vector query
-        // and post-filter from D1 results
-      }
-      if (has_attachment === true) filter.has_attachment = 1;
-      if (has_attachment === false) filter.has_attachment = 0;
+      if (has_attachment === true && channel !== "whatsapp") filter.has_attachment = 1;
+      if (has_attachment === false && channel !== "whatsapp") filter.has_attachment = 0;
+      // `sender` handled as post-filter below — Vectorize has no substring op.
 
       // Query Vectorize
       const vectorResults = await env.VECTORIZE.query(queryVector, {
@@ -89,22 +90,53 @@ For finding emails when you know specific terms/dates, prefer search_messages (I
         returnMetadata: "all",
       });
 
-      // Enrich from D1
+      // Enrich from D1 (email rows and WhatsApp rows, depending on vector id prefix)
       const messages: any[] = [];
       for (const match of vectorResults.matches) {
-        const meta = match.metadata || {};
-        const row = await env.DB.prepare("SELECT * FROM emails WHERE id = ?")
-          .bind(match.id)
-          .first();
+        const isWa = typeof match.id === "string" && match.id.startsWith("wa:");
+        if (isWa) {
+          // wa:{account}:{chat_jid}:{message_id}
+          const rest = (match.id as string).slice(3);
+          const firstColon = rest.indexOf(":");
+          const lastColon = rest.lastIndexOf(":");
+          if (firstColon < 0 || lastColon <= firstColon) continue;
+          const accountId = rest.slice(0, firstColon);
+          const chatJid = rest.slice(firstColon + 1, lastColon);
+          const messageId = rest.slice(lastColon + 1);
 
-        if (row) {
-          // Post-filter by sender if specified
-          if (sender && !(row.sender as string).toLowerCase().includes(sender.toLowerCase())) {
-            continue;
-          }
+          const row = await env.DB.prepare(
+            `SELECT m.id, m.chat_jid, m.account_id, m.sender, m.content, m.timestamp,
+                    m.is_from_me, m.media_type, c.name AS chat_name
+             FROM wa_messages m
+             LEFT JOIN wa_chats c ON c.jid = m.chat_jid AND c.account_id = m.account_id
+             WHERE m.account_id = ? AND m.chat_jid = ? AND m.id = ?`
+          ).bind(accountId, chatJid, messageId).first<any>();
+          if (!row) continue;
+          if (sender && !(row.sender as string || "").toLowerCase().includes(sender.toLowerCase())) continue;
+
+          messages.push({
+            channel: "whatsapp",
+            account: row.account_id,
+            chat_jid: row.chat_jid,
+            chat_name: row.chat_name,
+            message_id: row.id,
+            sender: row.sender,
+            date: row.timestamp,
+            is_from_me: !!row.is_from_me,
+            media_type: row.media_type || null,
+            snippet: (row.content || "").slice(0, 300),
+            score: match.score ? Math.round(match.score * 10000) / 10000 : 0,
+          });
+        } else {
+          const row = await env.DB.prepare("SELECT * FROM emails WHERE id = ?")
+            .bind(match.id)
+            .first();
+          if (!row) continue;
+          if (sender && !((row.sender as string) || "").toLowerCase().includes(sender.toLowerCase())) continue;
 
           const attFilenames = JSON.parse((row.attachment_filenames as string) || "[]");
           messages.push({
+            channel: "email",
             uid: row.uid,
             folder: row.folder,
             date: row.date_iso,
@@ -122,18 +154,24 @@ For finding emails when you know specific terms/dates, prefer search_messages (I
         "SELECT * FROM sync_jobs WHERE status = 'running' LIMIT 1"
       ).first();
 
+      const waCountRow = await env.DB.prepare(
+        "SELECT COUNT(*) as cnt FROM wa_messages"
+      ).first<{ cnt: number }>();
+
       const result: any = {
         query,
+        channel,
         total: messages.length,
         messages,
-        currently_indexed: currentlyIndexed,
+        email_indexed: currentlyIndexed,
+        whatsapp_indexed: waCountRow?.cnt || 0,
       };
 
-      if (currentlyIndexed === 0) {
-        result._notice = "No emails have been indexed yet. Run sync_now first to populate the search index.";
+      if (channel !== "whatsapp" && currentlyIndexed === 0) {
+        result._notice = "No emails have been indexed yet. Run sync_now first to populate the email index.";
       }
       if (runningJob) {
-        result._notice = `> Note: sync in progress. Results may be incomplete.`;
+        result._notice = `> Note: email sync in progress. Results may be incomplete.`;
       }
 
       return { content: [{ type: "text", text: JSON.stringify(result) }] };

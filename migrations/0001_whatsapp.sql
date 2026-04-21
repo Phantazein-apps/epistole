@@ -1,50 +1,14 @@
-CREATE TABLE IF NOT EXISTS folder_state (
-  folder       TEXT PRIMARY KEY,
-  last_uid     INTEGER NOT NULL DEFAULT 0,
-  uidvalidity  INTEGER NOT NULL DEFAULT 0,
-  last_sync_at TEXT,
-  message_count INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS emails (
-  id                   TEXT PRIMARY KEY,
-  folder               TEXT NOT NULL,
-  uid                  INTEGER NOT NULL,
-  message_id           TEXT,
-  in_reply_to          TEXT,
-  subject              TEXT,
-  sender               TEXT,
-  recipients           TEXT,
-  date_iso             TEXT,
-  has_attachments      INTEGER DEFAULT 0,
-  attachment_filenames TEXT,
-  snippet              TEXT,
-  indexed_at           TEXT
-);
-
-CREATE TABLE IF NOT EXISTS sync_jobs (
-  job_id      TEXT PRIMARY KEY,
-  status      TEXT NOT NULL,
-  started_at  TEXT,
-  finished_at TEXT,
-  folders     TEXT,
-  full_sync   INTEGER DEFAULT 0,
-  error       TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(message_id);
-CREATE INDEX IF NOT EXISTS idx_emails_in_reply_to ON emails(in_reply_to);
-CREATE INDEX IF NOT EXISTS idx_emails_folder ON emails(folder);
-CREATE INDEX IF NOT EXISTS idx_emails_date ON emails(date_iso);
-
--- ── WhatsApp mirror (BETA, read-only — see migrations/0001_whatsapp.sql) ──
+-- WhatsApp channel (BETA, read-only mirror).
+-- Hermeneia remains the canonical WhatsApp MCP; it pushes events here via
+-- /api/wa/push so Epistole can index them for unified semantic_search.
+-- No writes, no sends, no command queue.
 
 CREATE TABLE IF NOT EXISTS wa_accounts (
-  id              TEXT PRIMARY KEY,
+  id              TEXT PRIMARY KEY,        -- stable slug: "personal", "spain", "default"
   label           TEXT,
   phone           TEXT,
   connected_at    TEXT,
-  last_seen_at    TEXT
+  last_seen_at    TEXT                     -- updated by /api/wa/heartbeat
 );
 
 CREATE TABLE IF NOT EXISTS wa_chats (
@@ -60,17 +24,17 @@ CREATE TABLE IF NOT EXISTS wa_chats (
 );
 
 CREATE TABLE IF NOT EXISTS wa_messages (
-  id           TEXT NOT NULL,
+  id           TEXT NOT NULL,              -- whatsmeow message id
   chat_jid     TEXT NOT NULL,
   account_id   TEXT NOT NULL,
-  sender       TEXT,
+  sender       TEXT,                       -- full sender jid
   content      TEXT,
-  timestamp    TEXT,
+  timestamp    TEXT,                       -- ISO-8601
   is_from_me   INTEGER DEFAULT 0,
-  media_type   TEXT,
-  media_info   TEXT,
+  media_type   TEXT,                       -- image | video | audio | document | sticker | null
+  media_info   TEXT,                       -- JSON blob (URL, mediaKey, sha, filesize) — reserved
   filename     TEXT,
-  indexed_at   TEXT,
+  indexed_at   TEXT,                       -- when this row was written on the Worker
   PRIMARY KEY (id, chat_jid, account_id)
 );
 

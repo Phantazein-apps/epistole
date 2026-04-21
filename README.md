@@ -134,6 +134,47 @@ Folders are synced in priority order: INBOX first, then Sent, Archive, and the r
 
 Visit `https://<your-worker>/status` (e.g. `https://email-mcp.your-subdomain.workers.dev/status` or `https://mail.yourdomain.com/status`) to check sync progress anytime. The page is protected by the same email verification flow — you'll need to enter a one-time code sent to your inbox. No login or password required.
 
+## WhatsApp bridge (optional)
+
+Epistole can receive a mirror of WhatsApp events from [Hermeneia](https://github.com/Phantazein-apps/hermeneia) — a separate, desktop-only WhatsApp MCP. Once enabled, `semantic_search` finds WhatsApp messages and emails in the same query, from any device including the Claude mobile apps.
+
+**Prerequisites**: you also need Hermeneia installed on your Mac (where your WhatsApp session lives). Hermeneia runs locally and pushes events one-way to Epistole; Epistole never sends WhatsApp messages, and no media bytes are uploaded.
+
+### Enabling during install
+
+The installer asks *"Enable WhatsApp bridge endpoint? [y/N]"*. Answer **y**. It generates a random 64-character token, stores it as the `WA_BRIDGE_TOKEN` Worker secret, and prints the token once — save it in your password manager. You'll paste it into Hermeneia's config later.
+
+### Enabling on an existing install
+
+If you already deployed Epistole without the bridge, add the secret manually:
+
+```bash
+# From the Epistole repo
+wrangler secret put WA_BRIDGE_TOKEN
+# Enter a random 32+ character string at the prompt. Save this value — paste it
+# into Hermeneia and Cloudflare won't show it again.
+wrangler deploy
+```
+
+Then configure Hermeneia: Claude Desktop → Settings → Extensions → WhatsApp (Hermeneia) → paste the token into **Epistole mirror token** and the Worker URL into **Epistole mirror URL**.
+
+### Rotating the token
+
+If you ever lose the value, rotate both sides in one step:
+
+```bash
+wrangler secret put WA_BRIDGE_TOKEN   # enter a fresh random value
+```
+
+Then paste the same value into Hermeneia's config and restart the Hermeneia extension.
+
+### Endpoints added
+
+- `POST /api/wa/push` — batch upsert of messages, chats, contacts (idempotent)
+- `POST /api/wa/heartbeat` — liveness ping per WhatsApp account, every ~60s
+
+Both require `Authorization: Bearer <WA_BRIDGE_TOKEN>`. With the secret unset both return 503, keeping the bridge safely disabled by default.
+
 ## Security
 
 - **Credentials** stored as Worker secrets (encrypted at rest, never in code or logs)
