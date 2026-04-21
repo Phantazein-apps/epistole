@@ -18,6 +18,9 @@ export interface Env {
   SMTP_PASS: string;
   EMAIL_ADDRESS: string;
   FULL_NAME: string;
+
+  // WhatsApp mirror (BETA; optional — only set when the mirror is enabled)
+  WA_BRIDGE_TOKEN?: string;        // shared secret; Hermeneia sends Bearer <token>
 }
 
 export interface EmailMeta {

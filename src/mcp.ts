@@ -5,6 +5,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerLiveTools } from "./tools/live.js";
 import { registerSearchTools } from "./tools/search.js";
+import { registerWhatsAppTools } from "./tools/whatsapp.js";
 import type { Env } from "./types.js";
 
 export function createMcpServer(env: Env): McpServer {
@@ -15,6 +16,7 @@ export function createMcpServer(env: Env): McpServer {
 
   registerLiveTools(server, env);
   registerSearchTools(server, env);
+  registerWhatsAppTools(server, env);
 
   return server;
 }

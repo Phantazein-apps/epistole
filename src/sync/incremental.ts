@@ -256,6 +256,7 @@ async function syncFolder(
         id: emailId,
         text: embedText,
         metadata: {
+          channel: "email",
           folder, uid,
           date: parsed.date ? parsed.date.getTime() / 1000 : 0,
           sender: from, subject: subj,
