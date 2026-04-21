@@ -153,6 +153,26 @@ Visit `https://<your-worker>/status` (e.g. `https://email-mcp.your-subdomain.wor
 
 **Personal use: $0/month.** Heavy use (50K+ messages, constant searching): ~$5–8/month (Workers Paid plan base).
 
+## Comparison to other email MCP servers
+
+*Last updated: April 21, 2026*
+
+Compared to `yunfeizhu/mcp-mail-server`, `ai-zerolab/mcp-email-server`, `codefuturist/email-mcp`, Improvado, and Gmail/Outlook MCP:
+
+- **Persisted semantic search over the archive** (Vectorize + `bge-base-en-v1.5`). No open-source IMAP/SMTP MCP ships this; competitors do IMAP `SEARCH` plus AI-on-fetch.
+- **Remote MCP, claude.ai web and mobile compatible** via Streamable HTTP + bearer token. Local stdio competitors can't be used outside Claude Desktop.
+- **User-owned single-tenant deploy.** Your Cloudflare account, your D1, your Vectorize. Improvado is hosted but multi-tenant SaaS holding your credentials; everyone else is local-only.
+- **Always-on background sync** every 15 min via cron. Inbox stays searchable when your laptop is off.
+- **R2-cached attachments** served without an IMAP round-trip.
+- **Provider-agnostic IMAP/SMTP** (Gmail, Outlook, Migadu, Fastmail, self-hosted Dovecot, anything RFC 3501). Gmail/Outlook MCPs lock you to one OAuth provider.
+- **$0/month** on Cloudflare free tier for personal use.
+
+### Trade-offs
+
+- Tool surface is narrower than `codefuturist/email-mcp` (14 vs 47 tools): no multi-account, no scheduling, no calendar extraction, no IDLE-based real-time triage.
+- Setup is heavier than an npx one-liner: 6 commands + 11 secrets + a Cloudflare account.
+- No Docker image, no `.mcpb` bundle, no install wizard yet.
+
 ## License
 
 MIT
