@@ -14,7 +14,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { registerLiveTools } from "./tools/live.js";
 import { registerSearchTools } from "./tools/search.js";
-import { registerWhatsAppTools } from "./tools/whatsapp.js";
 import { runIncrementalSync } from "./sync/incremental.js";
 import authHandler from "./auth-handler.js";
 import type { Env } from "./types.js";
@@ -37,7 +36,6 @@ export class EmailMcpAgent extends McpAgent<Env, Record<string, never>, Props> {
   async init() {
     registerLiveTools(this.server, this.env);
     registerSearchTools(this.server, this.env);
-    registerWhatsAppTools(this.server, this.env);
   }
 }
 
