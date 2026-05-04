@@ -16,15 +16,11 @@ import { Hono } from "hono";
 import type { AuthRequest, OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { connect } from "cloudflare:sockets";
 import { runIncrementalSync } from "./sync/incremental.js";
-import waHandler from "./wa/handler.js";
 import type { Env } from "./types.js";
 
 type Bindings = Env & { OAUTH_PROVIDER: OAuthHelpers };
 
 const app = new Hono<{ Bindings: Bindings }>();
-
-// WhatsApp bridge API (bearer-auth via WA_BRIDGE_TOKEN; see src/wa/handler.ts)
-app.route("/api/wa", waHandler);
 
 const CODE_TTL = 300; // 5 minutes
 const CODE_LENGTH = 6;
