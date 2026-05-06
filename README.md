@@ -191,7 +191,7 @@ The optional WhatsApp mirror has been deprecated and is no longer registered wit
 
 ## Comparison to other email MCP servers
 
-*Last updated: April 21, 2026*
+*Last updated: May 6, 2026*
 
 Compared to `yunfeizhu/mcp-mail-server`, `ai-zerolab/mcp-email-server`, `codefuturist/email-mcp`, Improvado, and Gmail/Outlook MCP:
 
