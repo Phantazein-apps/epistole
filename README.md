@@ -43,7 +43,7 @@ Claude Desktop → mcp-remote → Cloudflare Worker (/mcp)
 
 All email data stays in your own Cloudflare account. No third-party services. $0/month on the free tier for personal use.
 
-## Tools (14)
+## Tools (19)
 
 ### Live IMAP/SMTP
 
@@ -52,11 +52,16 @@ All email data stays in your own Cloudflare account. No third-party services. $0
 | `read_inbox` | List recent messages from any folder |
 | `search_messages` | Search by sender, recipient, subject, body, date |
 | `get_message` | Full message content with text, HTML, attachments |
+| `get_emails` | Batch-fetch up to 20 messages by UID in one IMAP session |
 | `send_message` | Compose and send new emails |
 | `reply_to_message` | Reply or reply-all with proper threading |
+| `forward_message` | Forward an existing message inline with quoted original |
+| `save_draft` | APPEND a draft to the IMAP Drafts folder |
+| `send_draft` | Send a saved draft via SMTP, then remove it from Drafts |
 | `list_folders` | List all mailbox folders |
 | `mark_read` / `mark_unread` | Toggle read status |
 | `move_message` | Move messages between folders |
+| `bulk_action` | Apply mark_read / mark_unread / delete / move to up to 100 UIDs at once |
 
 ### Semantic Search
 
@@ -67,6 +72,33 @@ All email data stays in your own Cloudflare account. No third-party services. $0
 | `sync_now` | Trigger an immediate sync cycle |
 | `sync_status` | Check progress, per-folder stats, errors |
 | `find_by_thread` | Find thread by Message-ID or subject |
+
+## Prompts (7)
+
+Workflow templates exposed via MCP `prompts/list`. They prime Claude to drive the existing tools toward a specific outcome — no new server logic.
+
+| Prompt | What it does |
+|--------|--------------|
+| `triage_inbox` | Walk recent inbox, bucket into act-now / reply / archive / ignore |
+| `summarize_thread` | Chronological summary + decisions + open questions for a thread |
+| `compose_reply` | Draft a reply for review (does not send) |
+| `draft_from_context` | Compose a new email from a goal + context |
+| `extract_action_items` | Pull open action items addressed to you, grouped by urgency |
+| `summarize_meetings` | Roll up meeting-related mail (invites, recaps, follow-ups) |
+| `cleanup_inbox` | Identify low-value mail and propose a `bulk_action` plan |
+
+## Resources (6)
+
+Read-only views exposed via MCP `resources/list` and `resources/read`. The `{account}` template variable is a parity hook for multi-account servers (Tier 3 roadmap); today it must equal the configured `EMAIL_ADDRESS`.
+
+| URI | What it returns |
+|-----|-----------------|
+| `email://accounts` | Configured accounts (single-account today) |
+| `email://templates` | Reusable text templates (acknowledge, decline, follow-up, intro, out-of-office, thank-you) |
+| `email://scheduled` | Scheduled-send queue (empty until Tier 3 lands) |
+| `email://{account}/unread` | Unread INBOX messages, most recent 20 |
+| `email://{account}/mailboxes` | All IMAP folders for the account |
+| `email://{account}/stats` | Index totals, per-folder counts, top senders, last sync |
 
 ## Manual Deploy
 
@@ -159,7 +191,7 @@ The optional WhatsApp mirror has been deprecated and is no longer registered wit
 
 ## Comparison to other email MCP servers
 
-*Last updated: April 21, 2026*
+*Last updated: May 6, 2026*
 
 Compared to `yunfeizhu/mcp-mail-server`, `ai-zerolab/mcp-email-server`, `codefuturist/email-mcp`, Improvado, and Gmail/Outlook MCP:
 
@@ -173,7 +205,7 @@ Compared to `yunfeizhu/mcp-mail-server`, `ai-zerolab/mcp-email-server`, `codefut
 
 ### Trade-offs
 
-- Tool surface is narrower than `codefuturist/email-mcp` (14 vs 47 tools): no multi-account, no scheduling, no calendar extraction, no IDLE-based real-time triage.
+- Tool surface is narrower than `codefuturist/email-mcp` (19 vs 47 tools): no multi-account, no scheduling, no calendar extraction, no IDLE-based real-time triage.
 - Setup is heavier than an npx one-liner: 6 commands + 11 secrets + a Cloudflare account.
 - No Docker image, no `.mcpb` bundle, no install wizard yet.
 

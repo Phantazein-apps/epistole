@@ -274,20 +274,80 @@ export class ImapClient {
     return out;
   }
 
-  async uidStore(uid: number, flag: string, add: boolean): Promise<void> {
+  async uidStore(uid: number | number[], flag: string, add: boolean): Promise<void> {
+    const set = this.uidSet(uid);
+    if (!set) return;
     const op = add ? "+FLAGS" : "-FLAGS";
-    const resp = await this.command(`UID STORE ${uid} ${op} (${flag})`);
+    const resp = await this.command(`UID STORE ${set} ${op} (${flag})`);
     if (!resp.ok) throw new Error(`UID STORE failed: ${resp.status}`);
   }
 
-  async uidCopy(uid: number, destination: string): Promise<void> {
-    const resp = await this.command(`UID COPY ${uid} "${this.escape(destination)}"`);
+  async uidCopy(uid: number | number[], destination: string): Promise<void> {
+    const set = this.uidSet(uid);
+    if (!set) return;
+    const resp = await this.command(`UID COPY ${set} "${this.escape(destination)}"`);
     if (!resp.ok) throw new Error(`UID COPY failed: ${resp.status}`);
   }
 
   async expunge(): Promise<void> {
     const resp = await this.command("EXPUNGE");
     if (!resp.ok) throw new Error(`EXPUNGE failed: ${resp.status}`);
+  }
+
+  /**
+   * APPEND a message to a mailbox using a synchronizing literal.
+   *
+   *   C: APPEND "Drafts" (\Draft) {N}\r\n
+   *   S: + go ahead\r\n
+   *   C: <N bytes of RFC 822 message>
+   *   C: \r\n
+   *   S: A1 OK [APPENDUID <uidvalidity> <uid>] APPEND completed\r\n
+   *
+   * Returns the new UID if the server advertises APPENDUID (RFC 4315), null otherwise.
+   */
+  async append(
+    folder: string,
+    flags: string[],
+    message: Uint8Array
+  ): Promise<{ uidvalidity: number; uid: number } | null> {
+    if (!this.writer) throw new Error("Not connected");
+    const tag = `A${++this.tagCounter}`;
+    const flagStr = flags.length > 0 ? ` (${flags.join(" ")})` : "";
+    await this.sendRaw(
+      `${tag} APPEND "${this.escape(folder)}"${flagStr} {${message.length}}\r\n`
+    );
+
+    // Wait for the server's continuation prompt.  Some servers emit untagged
+    // status lines first; skip those and require a `+` line before sending
+    // the literal.
+    const deadline = Date.now() + TIMEOUT_MS;
+    while (true) {
+      const line = await this.readLine(deadline);
+      if (!line) throw new Error("APPEND: connection closed before continuation");
+      if (line.type !== "text") continue;
+      if (line.text.startsWith("+")) break;
+      if (line.text.startsWith("* ")) continue;
+      // A tagged NO/BAD here means the server rejected the command outright.
+      if (line.text.startsWith(`${tag} `)) {
+        throw new Error(`APPEND failed: ${line.text.substring(tag.length + 1)}`);
+      }
+    }
+
+    // Send the literal followed by CRLF to terminate the command.
+    await this.writer.write(message);
+    await this.writer.write(CRLF);
+
+    const resp = await this.readUntilTagged(tag);
+    if (!resp.ok) throw new Error(`APPEND failed: ${resp.status}`);
+
+    const m = resp.status.match(/APPENDUID\s+(\d+)\s+(\d+)/i);
+    return m ? { uidvalidity: parseInt(m[1]), uid: parseInt(m[2]) } : null;
+  }
+
+  /** Format `number | number[]` as a UID set, collapsing runs into ranges. */
+  private uidSet(uid: number | number[]): string {
+    const arr = Array.isArray(uid) ? uid : [uid];
+    return this.compactRange(arr);
   }
 
   // ── command loop ───────────────────────────────────────────────────
