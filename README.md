@@ -1,8 +1,32 @@
-# Epistole — Email MCP Server
+<div align="center">
 
-*Epistole* (ἐπιστολή) — Greek for "letter" or "epistle."
+<img src="assets/banner.svg" alt="Epistole — your email in Claude, semantically searchable" width="100%">
 
-A **remote MCP server** that connects Claude to your email over IMAP/SMTP, with semantic search powered by Cloudflare's AI stack. Runs as a single Cloudflare Worker — nothing installed locally.
+<p>
+  <img src="https://img.shields.io/badge/runs%20on-Cloudflare%20Workers-ff0018?style=flat-square&labelColor=000000" alt="Cloudflare Workers">
+  <img src="https://img.shields.io/badge/Claude-MCP-ff0018?style=flat-square&labelColor=000000" alt="Claude MCP">
+  <img src="https://img.shields.io/badge/protocol-IMAP%20%2F%20SMTP-f4f2ee?style=flat-square&labelColor=000000" alt="IMAP / SMTP">
+  <img src="https://img.shields.io/badge/cost-%240%2Fmo%20free%20tier-a8a5a0?style=flat-square&labelColor=000000" alt="Free tier">
+</p>
+
+**A remote MCP server that connects Claude to your email — IMAP/SMTP plus semantic search, all in your own Cloudflare account.**
+
+<sub>*Epistole* (**ἐπιστολή**) — Greek for "letter" or "epistle"<br>Part of the <a href="https://phantazein.com">Phantazein</a> toolkit</sub>
+
+</div>
+
+---
+
+<table>
+<tr>
+<td><a href="#install">📦 Install</a></td>
+<td><a href="#architecture">🏗 Architecture</a></td>
+<td><a href="#tools-19">🛠 Tools</a></td>
+<td><a href="#prompts-7">💬 Prompts</a></td>
+<td><a href="#resources-6">📂 Resources</a></td>
+<td><a href="#manual-deploy">⚙️ Manual deploy</a></td>
+</tr>
+</table>
 
 Unlike local email MCP servers, Epistole runs in the cloud: it syncs continuously (not just when your laptop is open), works from any device including mobile, and never stores email data on your machine. Your own Cloudflare account, your own Worker, your own data.
 
@@ -212,3 +236,9 @@ Compared to `yunfeizhu/mcp-mail-server`, `ai-zerolab/mcp-email-server`, `codefut
 ## License
 
 MIT
+
+---
+
+<div align="center">
+<sub>Built by <a href="https://phantazein.com">Phantazein</a> · <a href="https://github.com/Phantazein-apps">more tools →</a></sub>
+</div>
